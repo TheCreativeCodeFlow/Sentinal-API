@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.router import router
+from app.demo_target import demo_target_router
 
 app = FastAPI(
     title="SentinelAPI",
@@ -17,8 +18,9 @@ app.add_middleware(
 )
 
 app.include_router(router, prefix="/api/v1")
+app.include_router(demo_target_router)
 
 
 @app.get("/")
 async def root():
-    {"message": "SentinelAPI is running"}
+    return {"message": "SentinelAPI is running"}
