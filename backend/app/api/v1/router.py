@@ -16,6 +16,8 @@ from app.models import (
     TestExecution,
     Finding,
     Evidence,
+    EndpointAuthorizationPolicy,
+    AuthorizationMatrixRule,
 )
 from app.schemas import (
     ProjectCreate,
@@ -31,6 +33,7 @@ from app.schemas import (
     EndpointFilter,
     AuthSchemeCreate,
     AuthSchemeInDB,
+    RoleBase,
     RoleCreate,
     RoleUpdate,
     RoleInDB,
@@ -57,6 +60,17 @@ from app.schemas import (
     FindingInDB,
     FindingDetail,
     EvidenceInDB,
+    EndpointAuthorizationPolicyCreate,
+    EndpointAuthorizationPolicyUpdate,
+    EndpointAuthorizationPolicyInDB,
+    AuthorizationMatrixRuleCreate,
+    AuthorizationMatrixRuleUpdate,
+    AuthorizationMatrixRuleInDB,
+    AuthorizationMatrixCell,
+    AuthorizationMatrixEndpointRow,
+    AuthorizationMatrixView,
+    BFLATestGenerateRequest,
+    BFLATestGenerateResult,
 )
 
 
@@ -117,6 +131,17 @@ def get_resource_or_404(resource_id: str, db: Session) -> Resource:
             detail=f"Resource with id {resource_id} not found",
         )
     return resource
+
+
+def get_endpoint_or_404(endpoint_id: int, db: Session) -> Endpoint:
+    """Helper to get endpoint or raise 404."""
+    endpoint = db.query(Endpoint).filter(Endpoint.id == endpoint_id).first()
+    if not endpoint:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Endpoint with id {endpoint_id} not found",
+        )
+    return endpoint
 
 
 import json
@@ -195,12 +220,14 @@ def format_security_test_response(test: SecurityTest, db: Session) -> SecurityTe
         test_type=test.test_type,
         attacker_identity_id=test.attacker_identity_id,
         attacker_identity_name=attacker.name if attacker else None,
+        attacker_role_name=attacker.role.name if (attacker and attacker.role) else None,
         victim_identity_id=test.victim_identity_id,
         victim_identity_name=victim_ident.name if victim_ident else None,
         victim_resource_id=test.victim_resource_id,
         victim_resource_name=victim_res.name if victim_res else None,
         victim_resource_instance_id=test.victim_resource_instance_id,
         attacker_resource_instance_id=test.attacker_resource_instance_id,
+        expected_access=test.expected_access or "DENY",
         status=test.status,
         configuration=cfg,
         created_at=test.created_at,
@@ -334,6 +361,39 @@ def format_endpoint_response(endpoint: Endpoint) -> EndpointInDB:
     if endpoint.resource:
         data.resource_name = endpoint.resource.name
     return data
+
+
+def format_policy_response(policy: EndpointAuthorizationPolicy, db: Session) -> EndpointAuthorizationPolicyInDB:
+    endpoint = policy.endpoint
+    return EndpointAuthorizationPolicyInDB(
+        id=policy.id,
+        project_id=policy.project_id,
+        endpoint_id=policy.endpoint_id,
+        endpoint_method=endpoint.method if endpoint else None,
+        endpoint_path=endpoint.path if endpoint else None,
+        authentication_required=policy.authentication_required,
+        notes=policy.notes,
+        allowed_roles=[RoleBase(name=r.name, description=r.description) for r in policy.allowed_roles],
+        denied_roles=[RoleBase(name=r.name, description=r.description) for r in policy.denied_roles],
+        created_at=policy.created_at,
+        updated_at=policy.updated_at,
+    )
+
+
+def format_rule_response(rule: AuthorizationMatrixRule, db: Session) -> AuthorizationMatrixRuleInDB:
+    return AuthorizationMatrixRuleInDB(
+        id=rule.id,
+        project_id=rule.project_id,
+        endpoint_id=rule.endpoint_id,
+        role_id=rule.role_id,
+        role_name=rule.role.name if rule.role else None,
+        identity_id=rule.identity_id,
+        identity_name=rule.identity.name if rule.identity else None,
+        http_method=rule.http_method,
+        expected_access=rule.expected_access,
+        created_at=rule.created_at,
+        updated_at=rule.updated_at,
+    )
 
 
 # Main router for API
@@ -1271,77 +1331,96 @@ def create_security_test(
     if endpoint.method.upper() not in ["GET", "HEAD"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Method '{endpoint.method}' is not supported. Only safe HTTP methods (GET, HEAD) are allowed for Stage 3 BOLA testing.",
+            detail=f"Method '{endpoint.method}' is not supported. Only safe HTTP methods (GET, HEAD) are allowed for security testing.",
         )
 
-    # 4. Associated resource validation
-    if not endpoint.resource_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Endpoint must be associated with a domain resource before configuring BOLA tests.",
-        )
-
-    # 5. Validate Attacker Identity
+    # 4. Validate Attacker Identity
     attacker = get_identity_or_404(test_in.attacker_identity_id, db)
     if attacker.project_id != project_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Attacker identity belongs to a different project",
         )
-    if not attacker.credential_value and not attacker.credential_reference:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Attacker identity must have configured authentication credentials.",
-        )
 
-    # 6. Validate Victim Resource
-    victim_resource_id = test_in.victim_resource_id or endpoint.resource_id
-    victim_resource = get_resource_or_404(victim_resource_id, db)
-    if victim_resource.project_id != project_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Victim resource belongs to a different project",
-        )
+    is_bfla = (test_in.test_type or "BOLA").upper() == "BFLA"
+    victim_resource_id = None
+    victim_instance_id = None
+    attacker_instance_id = None
+    victim_identity_id = None
+    expected_access = test_in.expected_access or "DENY"
 
-    # 7. Validate Victim Identity if provided
-    if test_in.victim_identity_id:
-        victim_ident = get_identity_or_404(test_in.victim_identity_id, db)
-        if victim_ident.project_id != project_id:
+    if is_bfla:
+        # BFLA testing: function-level authorization
+        # Validate attacker credentials if not anonymous
+        is_anon = (
+            attacker.auth_type.lower() == "none"
+            or attacker.name.lower() == "anonymous"
+            or (not attacker.credential_value and not attacker.credential_reference)
+        )
+        # BFLA allows anonymous testing against protected endpoints
+    else:
+        # BOLA testing: resource-level authorization
+        if not endpoint.resource_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Victim identity belongs to a different project",
+                detail="Endpoint must be associated with a domain resource before configuring BOLA tests.",
             )
 
-    # 8. Resolve Victim Resource Instance ID
-    victim_instance_id = test_in.victim_resource_instance_id
-    if not victim_instance_id:
-        # Check ownership records for victim resource
-        query = db.query(ResourceOwnership).filter(
-            ResourceOwnership.resource_id == victim_resource.id,
-            ResourceOwnership.resource_instance_id.isnot(None),
-        )
+        if not attacker.credential_value and not attacker.credential_reference:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Attacker identity must have configured authentication credentials.",
+            )
+
+        # Validate Victim Resource
+        res_id = test_in.victim_resource_id or endpoint.resource_id
+        victim_resource = get_resource_or_404(res_id, db)
+        if victim_resource.project_id != project_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Victim resource belongs to a different project",
+            )
+        victim_resource_id = victim_resource.id
+
+        # Validate Victim Identity if provided
         if test_in.victim_identity_id:
-            query = query.filter(ResourceOwnership.identity_id == test_in.victim_identity_id)
-        ownership = query.first()
-        if ownership and ownership.resource_instance_id:
-            victim_instance_id = ownership.resource_instance_id
+            victim_ident = get_identity_or_404(test_in.victim_identity_id, db)
+            if victim_ident.project_id != project_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Victim identity belongs to a different project",
+                )
+            victim_identity_id = victim_ident.id
 
-    if not victim_instance_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="A victim resource instance identifier (for path substitution or target verification) is required.",
-        )
+        # Resolve Victim Resource Instance ID
+        victim_instance_id = test_in.victim_resource_instance_id
+        if not victim_instance_id:
+            query = db.query(ResourceOwnership).filter(
+                ResourceOwnership.resource_id == victim_resource.id,
+                ResourceOwnership.resource_instance_id.isnot(None),
+            )
+            if test_in.victim_identity_id:
+                query = query.filter(ResourceOwnership.identity_id == test_in.victim_identity_id)
+            ownership = query.first()
+            if ownership and ownership.resource_instance_id:
+                victim_instance_id = ownership.resource_instance_id
 
-    # 9. Resolve Attacker Resource Instance ID (if any, for baseline)
-    attacker_instance_id = test_in.attacker_resource_instance_id
-    if not attacker_instance_id:
-        att_ownership = db.query(ResourceOwnership).filter(
-            ResourceOwnership.resource_id == victim_resource.id,
-            ResourceOwnership.identity_id == attacker.id,
-            ResourceOwnership.resource_instance_id.isnot(None),
-        ).first()
-        if att_ownership and att_ownership.resource_instance_id:
-            attacker_instance_id = att_ownership.resource_instance_id
+        if not victim_instance_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="A victim resource instance identifier (for path substitution or target verification) is required.",
+            )
+
+        # Resolve Attacker Resource Instance ID (if any, for baseline)
+        attacker_instance_id = test_in.attacker_resource_instance_id
+        if not attacker_instance_id:
+            att_ownership = db.query(ResourceOwnership).filter(
+                ResourceOwnership.resource_id == victim_resource.id,
+                ResourceOwnership.identity_id == attacker.id,
+                ResourceOwnership.resource_instance_id.isnot(None),
+            ).first()
+            if att_ownership and att_ownership.resource_instance_id:
+                attacker_instance_id = att_ownership.resource_instance_id
 
     # Store configuration
     cfg_str = json.dumps(test_in.configuration) if test_in.configuration else None
@@ -1351,10 +1430,11 @@ def create_security_test(
         endpoint_id=endpoint.id,
         test_type=test_in.test_type or "BOLA",
         attacker_identity_id=attacker.id,
-        victim_identity_id=test_in.victim_identity_id,
-        victim_resource_id=victim_resource.id,
+        victim_identity_id=victim_identity_id,
+        victim_resource_id=victim_resource_id,
         victim_resource_instance_id=victim_instance_id,
         attacker_resource_instance_id=attacker_instance_id,
+        expected_access=expected_access,
         status="configured",
         configuration=cfg_str,
     )
@@ -1397,7 +1477,7 @@ async def execute_security_test(
     test_id: str,
     db: Session = Depends(get_db),
 ):
-    """Execute a configured security test asynchronously."""
+    """Execute a configured security test asynchronously (BOLA or BFLA)."""
     test = get_security_test_or_404(test_id, db)
 
     # Safety validation
@@ -1409,10 +1489,41 @@ async def execute_security_test(
 
     from app.main import app as fastapi_app
     from app.services.security_engine.evaluator import BOLAEngine
+    from app.services.security_engine.bfla_engine import BFLAEngine
 
-    engine = BOLAEngine(db=db, app=fastapi_app)
+    if test.test_type.upper() == "BFLA":
+        engine = BFLAEngine(db=db, app=fastapi_app)
+    else:
+        engine = BOLAEngine(db=db, app=fastapi_app)
+
     execution = await engine.execute_test(test)
     return format_execution_response(execution)
+
+
+@security_test_router.post("/projects/{project_id}/generate-bfla-tests", response_model=BFLATestGenerateResult)
+def generate_bfla_tests_for_project(
+    project_id: int,
+    request_in: BFLATestGenerateRequest,
+    db: Session = Depends(get_db),
+):
+    """Automatically generate controlled BFLA security tests for safe endpoints."""
+    from app.services.security_engine.generator import BFLATestGenerator
+    try:
+        created_tests, skipped = BFLATestGenerator.generate_tests(
+            db=db,
+            project_id=project_id,
+            endpoint_ids=request_in.endpoint_ids if not request_in.target_all_safe_endpoints else None,
+        )
+        return BFLATestGenerateResult(
+            generated_count=len(created_tests),
+            skipped_count=skipped,
+            tests=[format_security_test_response(t, db) for t in created_tests],
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
 
 
 @security_test_router.get("/security-tests/{test_id}/executions", response_model=List[TestExecutionInDB])
@@ -1448,15 +1559,18 @@ def list_findings_for_project(
     project_id: int,
     severity: Optional[str] = None,
     status_filter: Optional[str] = None,
+    type_filter: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
-    """List findings for a project."""
+    """List findings for a project with optional filtering by severity, status, or type (BOLA/BFLA)."""
     get_project_or_404(project_id, db)
     query = db.query(Finding).filter(Finding.project_id == project_id)
     if severity:
         query = query.filter(Finding.severity == severity.upper())
     if status_filter:
         query = query.filter(Finding.status == status_filter.upper())
+    if type_filter:
+        query = query.filter(Finding.type == type_filter.upper())
     findings = query.order_by(Finding.created_at.desc()).all()
     return [format_finding_response(f, db) for f in findings]
 
@@ -1510,10 +1624,381 @@ async def replay_test_for_finding(
 
     from app.main import app as fastapi_app
     from app.services.security_engine.evaluator import BOLAEngine
+    from app.services.security_engine.bfla_engine import BFLAEngine
 
-    engine = BOLAEngine(db=db, app=fastapi_app)
+    if (test and test.test_type.upper() == "BFLA") or finding.type.upper() == "BFLA":
+        engine = BFLAEngine(db=db, app=fastapi_app)
+    else:
+        engine = BOLAEngine(db=db, app=fastapi_app)
+
     execution = await engine.execute_test(test)
     return format_execution_response(execution)
+
+
+# --- Authorization Matrix Routes ---
+
+matrix_router = APIRouter(tags=["Authorization Matrix"])
+
+
+@matrix_router.get("/projects/{project_id}/authorization-matrix", response_model=AuthorizationMatrixView)
+def get_authorization_matrix(
+    project_id: int,
+    db: Session = Depends(get_db),
+):
+    """
+    Get the complete Authorization Matrix (Identity/Role x Endpoint x HTTP Method x Expected Access)
+    with latest execution status and open findings.
+    """
+    project = get_project_or_404(project_id, db)
+    roles = db.query(Role).filter(Role.project_id == project_id).order_by(Role.name).all()
+    endpoints = (
+        db.query(Endpoint)
+        .join(Endpoint.api)
+        .filter(Endpoint.api.has(project_id=project_id))
+        .order_by(Endpoint.path, Endpoint.method)
+        .all()
+    )
+
+    # Fetch all matrix rules for this project
+    rules = db.query(AuthorizationMatrixRule).filter(AuthorizationMatrixRule.project_id == project_id).all()
+    rule_map = {(r.endpoint_id, r.role_id): r for r in rules}
+
+    # Fetch policies
+    policies = db.query(EndpointAuthorizationPolicy).filter(EndpointAuthorizationPolicy.project_id == project_id).all()
+    policy_map = {p.endpoint_id: p for p in policies}
+
+    # Fetch BFLA security tests and their latest executions / findings
+    bfla_tests = db.query(SecurityTest).filter(
+        SecurityTest.project_id == project_id,
+        SecurityTest.test_type == "BFLA",
+    ).all()
+
+    test_map = {}
+    for t in bfla_tests:
+        if t.attacker_identity and t.attacker_identity.role_id:
+            test_map[(t.endpoint_id, t.attacker_identity.role_id)] = t
+
+    open_findings = db.query(Finding).filter(
+        Finding.project_id == project_id,
+        Finding.type == "BFLA",
+        Finding.status != "RESOLVED",
+    ).all()
+    finding_map = {}
+    for f in open_findings:
+        if f.endpoint_id and f.attacker_role_id:
+            finding_map[(f.endpoint_id, f.attacker_role_id)] = f
+
+    endpoint_rows = []
+    total_cells = 0
+    confirmed_count = 0
+    pass_count = 0
+    untested_count = 0
+
+    roles_data = [format_role_response(r, db) for r in roles]
+
+    for ep in endpoints:
+        policy = policy_map.get(ep.id)
+        cells = {}
+
+        for role in roles:
+            total_cells += 1
+            rule = rule_map.get((ep.id, role.id))
+            expected_access = "UNKNOWN"
+
+            if rule and rule.expected_access in ["ALLOW", "DENY", "UNKNOWN"]:
+                expected_access = rule.expected_access
+            elif policy:
+                if any(ar.id == role.id for ar in policy.allowed_roles):
+                    expected_access = "ALLOW"
+                elif any(dr.id == role.id for dr in policy.denied_roles):
+                    expected_access = "DENY"
+
+            # Check test and execution status
+            test = test_map.get((ep.id, role.id))
+            test_status = "NOT TESTED"
+            sec_test_id = None
+            latest_exec_id = None
+            latest_result = None
+            finding_id = None
+
+            if test:
+                sec_test_id = test.id
+                latest_exec = (
+                    db.query(TestExecution)
+                    .filter(TestExecution.security_test_id == test.id)
+                    .order_by(TestExecution.created_at.desc())
+                    .first()
+                )
+                if latest_exec and latest_exec.result:
+                    test_status = latest_exec.result
+                    latest_exec_id = latest_exec.id
+                    latest_result = latest_exec.result
+
+            # Check finding map
+            f = finding_map.get((ep.id, role.id))
+            if f:
+                finding_id = f.id
+                test_status = "CONFIRMED"
+                latest_result = "CONFIRMED"
+
+            if test_status == "CONFIRMED":
+                confirmed_count += 1
+            elif test_status == "PASS":
+                pass_count += 1
+            else:
+                untested_count += 1
+
+            cells[role.id] = AuthorizationMatrixCell(
+                endpoint_id=ep.id,
+                role_id=role.id,
+                role_name=role.name,
+                http_method=ep.method,
+                expected_access=expected_access,
+                test_status=test_status,
+                security_test_id=sec_test_id,
+                latest_execution_id=latest_exec_id,
+                latest_result=latest_result,
+                finding_id=finding_id,
+            )
+
+        endpoint_rows.append(
+            AuthorizationMatrixEndpointRow(
+                endpoint_id=ep.id,
+                method=ep.method,
+                path=ep.path,
+                summary=ep.summary,
+                authentication_required=policy.authentication_required if policy else True,
+                policy_notes=policy.notes if policy else None,
+                cells=cells,
+            )
+        )
+
+    return AuthorizationMatrixView(
+        project_id=project.id,
+        project_name=project.name,
+        roles=roles_data,
+        endpoints=endpoint_rows,
+        total_cells=total_cells,
+        confirmed_count=confirmed_count,
+        pass_count=pass_count,
+        untested_count=untested_count,
+    )
+
+
+@matrix_router.post("/projects/{project_id}/authorization-matrix/rules", response_model=AuthorizationMatrixRuleInDB)
+def create_or_update_matrix_rule(
+    project_id: int,
+    rule_in: AuthorizationMatrixRuleCreate,
+    db: Session = Depends(get_db),
+):
+    """Create or update an authorization matrix rule."""
+    get_project_or_404(project_id, db)
+    endpoint = get_endpoint_or_404(rule_in.endpoint_id, db)
+    if endpoint.api and endpoint.api.project_id != project_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Endpoint belongs to a different project",
+        )
+
+    if rule_in.role_id:
+        role = get_role_or_404(rule_in.role_id, db)
+        if role.project_id != project_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Role belongs to a different project",
+            )
+
+    if rule_in.identity_id:
+        ident = get_identity_or_404(rule_in.identity_id, db)
+        if ident.project_id != project_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Identity belongs to a different project",
+            )
+
+    expected_access = rule_in.expected_access.upper().strip()
+    if expected_access not in ["ALLOW", "DENY", "UNKNOWN"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid expected access '{rule_in.expected_access}'. Must be ALLOW, DENY, or UNKNOWN.",
+        )
+
+    # Upsert rule
+    rule = (
+        db.query(AuthorizationMatrixRule)
+        .filter(
+            AuthorizationMatrixRule.project_id == project_id,
+            AuthorizationMatrixRule.endpoint_id == rule_in.endpoint_id,
+            AuthorizationMatrixRule.role_id == rule_in.role_id,
+            AuthorizationMatrixRule.http_method == rule_in.http_method.upper(),
+        )
+        .first()
+    )
+
+    if rule:
+        rule.expected_access = expected_access
+    else:
+        rule = AuthorizationMatrixRule(
+            project_id=project_id,
+            endpoint_id=rule_in.endpoint_id,
+            role_id=rule_in.role_id,
+            identity_id=rule_in.identity_id,
+            http_method=rule_in.http_method.upper(),
+            expected_access=expected_access,
+        )
+        db.add(rule)
+
+    db.commit()
+    db.refresh(rule)
+    return format_rule_response(rule, db)
+
+
+@matrix_router.put("/projects/{project_id}/authorization-matrix/rules", response_model=List[AuthorizationMatrixRuleInDB])
+def bulk_update_matrix_rules(
+    project_id: int,
+    rules_in: List[AuthorizationMatrixRuleCreate],
+    db: Session = Depends(get_db),
+):
+    """Bulk upsert authorization matrix rules for a project."""
+    get_project_or_404(project_id, db)
+    results = []
+    for r_in in rules_in:
+        endpoint = get_endpoint_or_404(r_in.endpoint_id, db)
+        if endpoint.api and endpoint.api.project_id != project_id:
+            continue
+
+        if r_in.role_id:
+            role = get_role_or_404(r_in.role_id, db)
+            if role.project_id != project_id:
+                continue
+
+        expected_access = r_in.expected_access.upper().strip()
+        if expected_access not in ["ALLOW", "DENY", "UNKNOWN"]:
+            continue
+
+        rule = (
+            db.query(AuthorizationMatrixRule)
+            .filter(
+                AuthorizationMatrixRule.project_id == project_id,
+                AuthorizationMatrixRule.endpoint_id == r_in.endpoint_id,
+                AuthorizationMatrixRule.role_id == r_in.role_id,
+                AuthorizationMatrixRule.http_method == r_in.http_method.upper(),
+            )
+            .first()
+        )
+        if rule:
+            rule.expected_access = expected_access
+        else:
+            rule = AuthorizationMatrixRule(
+                project_id=project_id,
+                endpoint_id=r_in.endpoint_id,
+                role_id=r_in.role_id,
+                identity_id=r_in.identity_id,
+                http_method=r_in.http_method.upper(),
+                expected_access=expected_access,
+            )
+            db.add(rule)
+        results.append(rule)
+
+    db.commit()
+    for r in results:
+        db.refresh(r)
+    return [format_rule_response(r, db) for r in results]
+
+
+@matrix_router.delete("/authorization-matrix/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_matrix_rule(
+    rule_id: str,
+    db: Session = Depends(get_db),
+):
+    """Delete an authorization matrix rule."""
+    rule = db.query(AuthorizationMatrixRule).filter(AuthorizationMatrixRule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Rule {rule_id} not found")
+    db.delete(rule)
+    db.commit()
+    return None
+
+
+# --- Endpoint Authorization Policy Routes ---
+
+policy_router = APIRouter(tags=["Endpoint Authorization Policies"])
+
+
+@policy_router.get("/endpoints/{endpoint_id}/policy", response_model=EndpointAuthorizationPolicyInDB)
+def get_endpoint_policy(
+    endpoint_id: int,
+    db: Session = Depends(get_db),
+):
+    """Get authorization policy for an endpoint."""
+    endpoint = get_endpoint_or_404(endpoint_id, db)
+    policy = db.query(EndpointAuthorizationPolicy).filter(EndpointAuthorizationPolicy.endpoint_id == endpoint_id).first()
+    if not policy:
+        project_id = endpoint.api.project_id if endpoint.api else 1
+        policy = EndpointAuthorizationPolicy(
+            project_id=project_id,
+            endpoint_id=endpoint.id,
+            authentication_required=True,
+            notes="",
+        )
+        db.add(policy)
+        db.commit()
+        db.refresh(policy)
+    return format_policy_response(policy, db)
+
+
+@policy_router.put("/endpoints/{endpoint_id}/policy", response_model=EndpointAuthorizationPolicyInDB)
+def update_endpoint_policy(
+    endpoint_id: int,
+    policy_in: EndpointAuthorizationPolicyUpdate,
+    db: Session = Depends(get_db),
+):
+    """Create or update endpoint authorization policy."""
+    endpoint = get_endpoint_or_404(endpoint_id, db)
+    project_id = endpoint.api.project_id if endpoint.api else 1
+
+    policy = db.query(EndpointAuthorizationPolicy).filter(EndpointAuthorizationPolicy.endpoint_id == endpoint_id).first()
+    if not policy:
+        policy = EndpointAuthorizationPolicy(
+            project_id=project_id,
+            endpoint_id=endpoint_id,
+            authentication_required=policy_in.authentication_required if policy_in.authentication_required is not None else True,
+            notes=policy_in.notes,
+        )
+        db.add(policy)
+    else:
+        if policy_in.authentication_required is not None:
+            policy.authentication_required = policy_in.authentication_required
+        if policy_in.notes is not None:
+            policy.notes = policy_in.notes
+
+    if policy_in.allowed_role_ids is not None:
+        allowed_roles = []
+        for r_id in policy_in.allowed_role_ids:
+            role = get_role_or_404(r_id, db)
+            if role.project_id != project_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Role {role.name} belongs to a different project",
+                )
+            allowed_roles.append(role)
+        policy.allowed_roles = allowed_roles
+
+    if policy_in.denied_role_ids is not None:
+        denied_roles = []
+        for r_id in policy_in.denied_role_ids:
+            role = get_role_or_404(r_id, db)
+            if role.project_id != project_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Role {role.name} belongs to a different project",
+                )
+            denied_roles.append(role)
+        policy.denied_roles = denied_roles
+
+    db.commit()
+    db.refresh(policy)
+    return format_policy_response(policy, db)
 
 
 # Include sub-routers into main router
@@ -1528,3 +2013,5 @@ router.include_router(ownership_router)
 router.include_router(endpoint_assoc_router)
 router.include_router(security_test_router)
 router.include_router(finding_router)
+router.include_router(matrix_router)
+router.include_router(policy_router)
