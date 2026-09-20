@@ -24,6 +24,11 @@ DEMO_USERS = {
         "name": "Bob Attacker",
         "role": "User",
     },
+    "demo-token-admin": {
+        "id": "admin_charlie_003",
+        "name": "Charlie Admin",
+        "role": "Admin",
+    },
 }
 
 DEMO_ORDERS: Dict[str, Dict[str, Any]] = {
@@ -117,3 +122,67 @@ def get_order_server_error(
 ):
     """Simulates an internal server error for inconclusive test verification."""
     raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ==============================================================================
+# STAGE 4: BFLA / Function-Level Test Endpoints
+# ==============================================================================
+
+@demo_target_router.get(
+    "/admin/system-stats",
+    summary="[TEST ONLY] Vulnerable BFLA Admin Endpoint",
+    description="Requires authentication but DOES NOT verify Admin role. Any user can access.",
+)
+def get_system_stats_vulnerable(
+    user: Dict[str, Any] = Depends(get_current_demo_user),
+):
+    """
+    Intentionally vulnerable BFLA endpoint:
+    Returns privileged administrative metrics to any authenticated user.
+    """
+    return {
+        "status": "healthy",
+        "total_users": 1500,
+        "active_sessions": 42,
+        "admin_keys": ["key_root_prod_001"],
+        "secret_token": "cluster_secret_xyz987",
+        "requested_by_user": user["name"],
+        "caller_role": user["role"],
+    }
+
+
+@demo_target_router.get(
+    "/admin/protected-system-stats",
+    summary="[TEST ONLY] Properly Protected BFLA Admin Endpoint",
+    description="Verifies that the caller has the 'Admin' role before returning data.",
+)
+def get_system_stats_protected(
+    user: Dict[str, Any] = Depends(get_current_demo_user),
+):
+    """
+    Secure endpoint:
+    Checks if caller role is Admin.
+    """
+    if user.get("role") != "Admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Forbidden: Administrative privileges required.",
+        )
+    return {
+        "status": "healthy",
+        "total_users": 1500,
+        "active_sessions": 42,
+        "admin_keys": ["key_root_prod_001"],
+    }
+
+
+@demo_target_router.get(
+    "/admin/error-stats",
+    summary="[TEST ONLY] Simulated BFLA Server Error Endpoint",
+    description="Simulates 500 server error on admin endpoint.",
+)
+def get_system_stats_error(
+    user: Dict[str, Any] = Depends(get_current_demo_user),
+):
+    """Simulates an internal server error on admin function."""
+    raise HTTPException(status_code=500, detail="Administrative service failure")
