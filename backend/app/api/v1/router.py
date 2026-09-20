@@ -12,6 +12,10 @@ from app.models import (
     Identity,
     Resource,
     ResourceOwnership,
+    SecurityTest,
+    TestExecution,
+    Finding,
+    Evidence,
 )
 from app.schemas import (
     ProjectCreate,
@@ -47,6 +51,12 @@ from app.schemas import (
     AuthorizationModelView,
     AuthModelIdentityNode,
     AuthModelResourceItem,
+    SecurityTestCreate,
+    SecurityTestInDB,
+    TestExecutionInDB,
+    FindingInDB,
+    FindingDetail,
+    EvidenceInDB,
 )
 
 
@@ -109,6 +119,8 @@ def get_resource_or_404(resource_id: str, db: Session) -> Resource:
     return resource
 
 
+import json
+
 def get_ownership_or_404(ownership_id: str, db: Session) -> ResourceOwnership:
     """Helper to get resource ownership or raise 404."""
     ownership = db.query(ResourceOwnership).filter(ResourceOwnership.id == ownership_id).first()
@@ -118,6 +130,173 @@ def get_ownership_or_404(ownership_id: str, db: Session) -> ResourceOwnership:
             detail=f"Resource ownership with id {ownership_id} not found",
         )
     return ownership
+
+
+def get_security_test_or_404(test_id: str, db: Session) -> SecurityTest:
+    """Helper to get security test or raise 404."""
+    test = db.query(SecurityTest).filter(SecurityTest.id == test_id).first()
+    if not test:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Security test with id {test_id} not found",
+        )
+    return test
+
+
+def get_execution_or_404(execution_id: str, db: Session) -> TestExecution:
+    """Helper to get test execution or raise 404."""
+    execution = db.query(TestExecution).filter(TestExecution.id == execution_id).first()
+    if not execution:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Test execution with id {execution_id} not found",
+        )
+    return execution
+
+
+def get_finding_or_404(finding_id: str, db: Session) -> Finding:
+    """Helper to get finding or raise 404."""
+    finding = db.query(Finding).filter(Finding.id == finding_id).first()
+    if not finding:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Finding with id {finding_id} not found",
+        )
+    return finding
+
+
+def format_security_test_response(test: SecurityTest, db: Session) -> SecurityTestInDB:
+    endpoint = test.endpoint
+    attacker = test.attacker_identity
+    victim_ident = test.victim_identity
+    victim_res = test.victim_resource
+    latest_exec = (
+        db.query(TestExecution)
+        .filter(TestExecution.security_test_id == test.id)
+        .order_by(TestExecution.created_at.desc())
+        .first()
+    )
+    executions_count = db.query(TestExecution).filter(TestExecution.security_test_id == test.id).count()
+    findings_count = db.query(Finding).filter(Finding.security_test_id == test.id).count()
+    
+    cfg = None
+    if test.configuration:
+        try:
+            cfg = json.loads(test.configuration)
+        except Exception:
+            cfg = None
+
+    return SecurityTestInDB(
+        id=test.id,
+        project_id=test.project_id,
+        endpoint_id=test.endpoint_id,
+        endpoint_method=endpoint.method if endpoint else None,
+        endpoint_path=endpoint.path if endpoint else None,
+        test_type=test.test_type,
+        attacker_identity_id=test.attacker_identity_id,
+        attacker_identity_name=attacker.name if attacker else None,
+        victim_identity_id=test.victim_identity_id,
+        victim_identity_name=victim_ident.name if victim_ident else None,
+        victim_resource_id=test.victim_resource_id,
+        victim_resource_name=victim_res.name if victim_res else None,
+        victim_resource_instance_id=test.victim_resource_instance_id,
+        attacker_resource_instance_id=test.attacker_resource_instance_id,
+        status=test.status,
+        configuration=cfg,
+        created_at=test.created_at,
+        updated_at=test.updated_at,
+        latest_result=latest_exec.result if latest_exec else None,
+        executions_count=executions_count,
+        findings_count=findings_count,
+    )
+
+
+def format_evidence_response(evidence: Optional[Evidence]) -> Optional[EvidenceInDB]:
+    if not evidence:
+        return None
+    req_meta = None
+    if evidence.request_metadata:
+        try:
+            req_meta = json.loads(evidence.request_metadata)
+        except Exception:
+            req_meta = None
+    resp_meta = None
+    if evidence.response_metadata:
+        try:
+            resp_meta = json.loads(evidence.response_metadata)
+        except Exception:
+            resp_meta = None
+
+    return EvidenceInDB(
+        id=evidence.id,
+        execution_id=evidence.execution_id,
+        finding_id=evidence.finding_id,
+        request_metadata=req_meta,
+        response_metadata=resp_meta,
+        expected_behavior=evidence.expected_behavior,
+        actual_behavior=evidence.actual_behavior,
+        redacted_request=evidence.redacted_request,
+        redacted_response=evidence.redacted_response,
+        reproducibility_status=evidence.reproducibility_status,
+        created_at=evidence.created_at,
+    )
+
+
+def format_execution_response(execution: TestExecution) -> TestExecutionInDB:
+    ev_data = format_evidence_response(execution.evidence)
+    return TestExecutionInDB(
+        id=execution.id,
+        security_test_id=execution.security_test_id,
+        status=execution.status,
+        result=execution.result,
+        result_reason=execution.result_reason,
+        started_at=execution.started_at,
+        completed_at=execution.completed_at,
+        http_status=execution.http_status,
+        duration_ms=execution.duration_ms,
+        error_category=execution.error_category,
+        created_at=execution.created_at,
+        evidence=ev_data,
+    )
+
+
+def format_finding_response(finding: Finding, db: Session) -> FindingInDB:
+    endpoint = finding.security_test.endpoint if finding.security_test else None
+    attacker = finding.security_test.attacker_identity if finding.security_test else None
+    victim_res = finding.security_test.victim_resource if finding.security_test else None
+    return FindingInDB(
+        id=finding.id,
+        project_id=finding.project_id,
+        security_test_id=finding.security_test_id,
+        execution_id=finding.execution_id,
+        type=finding.type,
+        severity=finding.severity,
+        confidence=finding.confidence,
+        status=finding.status,
+        title=finding.title,
+        description=finding.description,
+        remediation=finding.remediation,
+        created_at=finding.created_at,
+        endpoint_method=endpoint.method if endpoint else None,
+        endpoint_path=endpoint.path if endpoint else None,
+        attacker_identity_name=attacker.name if attacker else None,
+        victim_resource_name=victim_res.name if victim_res else None,
+        victim_resource_instance_id=finding.security_test.victim_resource_instance_id if finding.security_test else None,
+    )
+
+
+def format_finding_detail(finding: Finding, db: Session) -> FindingDetail:
+    base = format_finding_response(finding, db)
+    ev = db.query(Evidence).filter(Evidence.finding_id == finding.id).first()
+    if not ev and finding.execution:
+        ev = finding.execution.evidence
+    ev_in_db = format_evidence_response(ev)
+    return FindingDetail(
+        **base.model_dump(),
+        evidence=ev_in_db,
+        expected_behavior=ev.expected_behavior if ev else None,
+        actual_behavior=ev.actual_behavior if ev else None,
+    )
 
 
 def format_identity_response(identity: Identity) -> IdentityInDB:
@@ -1041,6 +1220,292 @@ def get_authorization_model(
     )
 
 
+# ==============================================================================
+# STAGE 3: Security Testing & Findings Routers
+# ==============================================================================
+
+security_test_router = APIRouter(tags=["Security Tests"])
+finding_router = APIRouter(tags=["Findings"])
+
+
+@security_test_router.post("/projects/{project_id}/security-tests/", response_model=SecurityTestInDB, status_code=status.HTTP_201_CREATED)
+def create_security_test(
+    project_id: int,
+    test_in: SecurityTestCreate,
+    db: Session = Depends(get_db),
+):
+    """Create a new BOLA security test for an endpoint in an authorized project."""
+    project = get_project_or_404(project_id, db)
+
+    # 1. Target Authorization Check (SAFETY)
+    if project.authorization_status.lower() != "authorized":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Target project has not been authorized for security testing. Please set project authorization status to 'authorized'.",
+        )
+
+    # 2. Validate Endpoint
+    endpoint = db.query(Endpoint).filter(Endpoint.id == test_in.endpoint_id).first()
+    if not endpoint:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Endpoint with id {test_in.endpoint_id} not found",
+        )
+    if endpoint.api.project_id != project_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Endpoint belongs to a different project",
+        )
+
+    # 3. Safe HTTP method validation
+    if endpoint.method.upper() not in ["GET", "HEAD"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Method '{endpoint.method}' is not supported. Only safe HTTP methods (GET, HEAD) are allowed for Stage 3 BOLA testing.",
+        )
+
+    # 4. Associated resource validation
+    if not endpoint.resource_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Endpoint must be associated with a domain resource before configuring BOLA tests.",
+        )
+
+    # 5. Validate Attacker Identity
+    attacker = get_identity_or_404(test_in.attacker_identity_id, db)
+    if attacker.project_id != project_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Attacker identity belongs to a different project",
+        )
+    if not attacker.credential_value and not attacker.credential_reference:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Attacker identity must have configured authentication credentials.",
+        )
+
+    # 6. Validate Victim Resource
+    victim_resource_id = test_in.victim_resource_id or endpoint.resource_id
+    victim_resource = get_resource_or_404(victim_resource_id, db)
+    if victim_resource.project_id != project_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Victim resource belongs to a different project",
+        )
+
+    # 7. Validate Victim Identity if provided
+    if test_in.victim_identity_id:
+        victim_ident = get_identity_or_404(test_in.victim_identity_id, db)
+        if victim_ident.project_id != project_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Victim identity belongs to a different project",
+            )
+
+    # 8. Resolve Victim Resource Instance ID
+    victim_instance_id = test_in.victim_resource_instance_id
+    if not victim_instance_id:
+        # Check ownership records for victim resource
+        query = db.query(ResourceOwnership).filter(
+            ResourceOwnership.resource_id == victim_resource.id,
+            ResourceOwnership.resource_instance_id.isnot(None),
+        )
+        if test_in.victim_identity_id:
+            query = query.filter(ResourceOwnership.identity_id == test_in.victim_identity_id)
+        ownership = query.first()
+        if ownership and ownership.resource_instance_id:
+            victim_instance_id = ownership.resource_instance_id
+
+    if not victim_instance_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A victim resource instance identifier (for path substitution or target verification) is required.",
+        )
+
+    # 9. Resolve Attacker Resource Instance ID (if any, for baseline)
+    attacker_instance_id = test_in.attacker_resource_instance_id
+    if not attacker_instance_id:
+        att_ownership = db.query(ResourceOwnership).filter(
+            ResourceOwnership.resource_id == victim_resource.id,
+            ResourceOwnership.identity_id == attacker.id,
+            ResourceOwnership.resource_instance_id.isnot(None),
+        ).first()
+        if att_ownership and att_ownership.resource_instance_id:
+            attacker_instance_id = att_ownership.resource_instance_id
+
+    # Store configuration
+    cfg_str = json.dumps(test_in.configuration) if test_in.configuration else None
+
+    security_test = SecurityTest(
+        project_id=project_id,
+        endpoint_id=endpoint.id,
+        test_type=test_in.test_type or "BOLA",
+        attacker_identity_id=attacker.id,
+        victim_identity_id=test_in.victim_identity_id,
+        victim_resource_id=victim_resource.id,
+        victim_resource_instance_id=victim_instance_id,
+        attacker_resource_instance_id=attacker_instance_id,
+        status="configured",
+        configuration=cfg_str,
+    )
+    db.add(security_test)
+    db.commit()
+    db.refresh(security_test)
+    return format_security_test_response(security_test, db)
+
+
+@security_test_router.get("/projects/{project_id}/security-tests/", response_model=List[SecurityTestInDB])
+def list_security_tests_for_project(
+    project_id: int,
+    test_type: Optional[str] = None,
+    status_filter: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """List all security tests configured for a project."""
+    get_project_or_404(project_id, db)
+    query = db.query(SecurityTest).filter(SecurityTest.project_id == project_id)
+    if test_type:
+        query = query.filter(SecurityTest.test_type == test_type)
+    if status_filter:
+        query = query.filter(SecurityTest.status == status_filter)
+    tests = query.order_by(SecurityTest.created_at.desc()).all()
+    return [format_security_test_response(t, db) for t in tests]
+
+
+@security_test_router.get("/security-tests/{test_id}", response_model=SecurityTestInDB)
+def get_security_test(
+    test_id: str,
+    db: Session = Depends(get_db),
+):
+    """Get security test details."""
+    test = get_security_test_or_404(test_id, db)
+    return format_security_test_response(test, db)
+
+
+@security_test_router.post("/security-tests/{test_id}/execute", response_model=TestExecutionInDB)
+async def execute_security_test(
+    test_id: str,
+    db: Session = Depends(get_db),
+):
+    """Execute a configured security test asynchronously."""
+    test = get_security_test_or_404(test_id, db)
+
+    # Safety validation
+    if not test.project or test.project.authorization_status.lower() != "authorized":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Target project has not been authorized for security testing. Set project authorization status to 'authorized'.",
+        )
+
+    from app.main import app as fastapi_app
+    from app.services.security_engine.evaluator import BOLAEngine
+
+    engine = BOLAEngine(db=db, app=fastapi_app)
+    execution = await engine.execute_test(test)
+    return format_execution_response(execution)
+
+
+@security_test_router.get("/security-tests/{test_id}/executions", response_model=List[TestExecutionInDB])
+def list_test_executions(
+    test_id: str,
+    db: Session = Depends(get_db),
+):
+    """List executions for a security test."""
+    get_security_test_or_404(test_id, db)
+    executions = (
+        db.query(TestExecution)
+        .filter(TestExecution.security_test_id == test_id)
+        .order_by(TestExecution.created_at.desc())
+        .all()
+    )
+    return [format_execution_response(e) for e in executions]
+
+
+@security_test_router.get("/executions/{execution_id}", response_model=TestExecutionInDB)
+def get_test_execution(
+    execution_id: str,
+    db: Session = Depends(get_db),
+):
+    """Get test execution details including redacted evidence."""
+    execution = get_execution_or_404(execution_id, db)
+    return format_execution_response(execution)
+
+
+# --- Findings Routes ---
+
+@finding_router.get("/projects/{project_id}/findings/", response_model=List[FindingInDB])
+def list_findings_for_project(
+    project_id: int,
+    severity: Optional[str] = None,
+    status_filter: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """List findings for a project."""
+    get_project_or_404(project_id, db)
+    query = db.query(Finding).filter(Finding.project_id == project_id)
+    if severity:
+        query = query.filter(Finding.severity == severity.upper())
+    if status_filter:
+        query = query.filter(Finding.status == status_filter.upper())
+    findings = query.order_by(Finding.created_at.desc()).all()
+    return [format_finding_response(f, db) for f in findings]
+
+
+@finding_router.get("/findings/{finding_id}", response_model=FindingDetail)
+def get_finding(
+    finding_id: str,
+    db: Session = Depends(get_db),
+):
+    """Get detailed finding information including evidence and remediation."""
+    finding = get_finding_or_404(finding_id, db)
+    return format_finding_detail(finding, db)
+
+
+@finding_router.get("/findings/{finding_id}/evidence", response_model=EvidenceInDB)
+def get_finding_evidence(
+    finding_id: str,
+    db: Session = Depends(get_db),
+):
+    """Get raw evidence for a finding."""
+    finding = get_finding_or_404(finding_id, db)
+    evidence = db.query(Evidence).filter(Evidence.finding_id == finding.id).first()
+    if not evidence and finding.execution:
+        evidence = finding.execution.evidence
+    if not evidence:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Evidence for finding {finding_id} not found",
+        )
+    return format_evidence_response(evidence)
+
+
+@finding_router.post("/findings/{finding_id}/replay", response_model=TestExecutionInDB)
+async def replay_test_for_finding(
+    finding_id: str,
+    db: Session = Depends(get_db),
+):
+    """Replay security test for an existing finding in the same authorized context."""
+    finding = get_finding_or_404(finding_id, db)
+    test = finding.security_test
+    if not test:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Associated security test not found",
+        )
+    if not test.project or test.project.authorization_status.lower() != "authorized":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Target project has not been authorized for security testing. Please set project authorization status to 'authorized'.",
+        )
+
+    from app.main import app as fastapi_app
+    from app.services.security_engine.evaluator import BOLAEngine
+
+    engine = BOLAEngine(db=db, app=fastapi_app)
+    execution = await engine.execute_test(test)
+    return format_execution_response(execution)
+
+
 # Include sub-routers into main router
 router.include_router(project_router)
 router.include_router(api_router)
@@ -1051,3 +1516,5 @@ router.include_router(identity_router)
 router.include_router(resource_router)
 router.include_router(ownership_router)
 router.include_router(endpoint_assoc_router)
+router.include_router(security_test_router)
+router.include_router(finding_router)
