@@ -1,6 +1,6 @@
 from typing import Optional, List, Any, Dict
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 # Project schemas
@@ -25,8 +25,7 @@ class ProjectInDB(ProjectCreate):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # API schemas
@@ -52,13 +51,13 @@ class APIInDB(APICreate):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # Endpoint schemas
 class EndpointCreate(BaseModel):
     api_id: int
+    resource_id: Optional[str] = None
     method: str = Field(..., min_length=1, max_length=10)
     path: str = Field(..., min_length=1, max_length=500)
     summary: Optional[str] = Field(None)
@@ -67,6 +66,7 @@ class EndpointCreate(BaseModel):
 
 
 class EndpointUpdate(BaseModel):
+    resource_id: Optional[str] = None
     summary: Optional[str] = Field(None)
     description: Optional[str] = Field(None)
     tags: Optional[List[str]] = Field(None)
@@ -75,10 +75,11 @@ class EndpointUpdate(BaseModel):
 class EndpointInDB(EndpointCreate):
     id: int
     api_id: int
+    resource_id: Optional[str] = None
+    resource_name: Optional[str] = None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # OpenAPI ingestion schemas
@@ -112,5 +113,185 @@ class AuthSchemeInDB(AuthSchemeCreate):
     id: int
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ==============================================================================
+# STAGE 2: Identity & Authorization Modeling Schemas
+# ==============================================================================
+
+# Role Schemas
+class RoleBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=500)
+
+
+class RoleCreate(RoleBase):
+    pass
+
+
+class RoleUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=500)
+
+
+class RoleInDB(RoleBase):
+    id: str
+    project_id: int
+    created_at: datetime
+    updated_at: datetime
+    identities_count: Optional[int] = 0
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RoleMember(BaseModel):
+    id: str
+    name: str
+    auth_type: str
+    environment: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RoleDetail(RoleInDB):
+    members: List[RoleMember] = []
+
+
+# Identity Schemas
+class IdentityBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = Field(None, max_length=500)
+    role_id: Optional[str] = None
+    auth_type: str = Field("bearer_token", min_length=1, max_length=50)
+    environment: str = Field("production", min_length=1, max_length=100)
+    credential_reference: Optional[str] = Field(None, max_length=255)
+    credential_status: str = Field("configured", min_length=1, max_length=50)
+
+
+class IdentityCreate(IdentityBase):
+    # Raw credential input is accepted on create/update for controlled test execution,
+    # but is NEVER returned in response schemas.
+    credential_value: Optional[str] = Field(None, max_length=2000)
+
+
+class IdentityUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[str] = Field(None, max_length=500)
+    role_id: Optional[str] = None
+    auth_type: Optional[str] = Field(None, min_length=1, max_length=50)
+    environment: Optional[str] = Field(None, min_length=1, max_length=100)
+    credential_reference: Optional[str] = Field(None, max_length=255)
+    credential_status: Optional[str] = Field(None, min_length=1, max_length=50)
+    credential_value: Optional[str] = Field(None, max_length=2000)
+
+
+class IdentityRoleAssign(BaseModel):
+    role_id: Optional[str] = None
+
+
+class IdentityInDB(IdentityBase):
+    id: str
+    project_id: int
+    role_name: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class IdentityDetail(IdentityInDB):
+    owned_resources_count: int = 0
+
+
+# Resource Schemas
+class ResourceBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = Field(None, max_length=500)
+    resource_type: str = Field("entity", min_length=1, max_length=100)
+    api_id: Optional[int] = None
+
+
+class ResourceCreate(ResourceBase):
+    pass
+
+
+class ResourceUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[str] = Field(None, max_length=500)
+    resource_type: Optional[str] = Field(None, min_length=1, max_length=100)
+    api_id: Optional[int] = None
+
+
+class ResourceInDB(ResourceBase):
+    id: str
+    project_id: int
+    created_at: datetime
+    updated_at: datetime
+    ownerships_count: Optional[int] = 0
+    endpoints_count: Optional[int] = 0
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# Resource Ownership Schemas
+class ResourceOwnershipCreate(BaseModel):
+    identity_id: str
+    resource_instance_id: Optional[str] = Field(None, max_length=255)
+    ownership_type: str = Field("owner", min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=500)
+
+
+class ResourceOwnershipInDB(BaseModel):
+    id: str
+    resource_id: str
+    identity_id: str
+    identity_name: Optional[str] = None
+    resource_name: Optional[str] = None
+    resource_instance_id: Optional[str] = None
+    ownership_type: str
+    description: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ResourceDetail(ResourceInDB):
+    ownerships: List[ResourceOwnershipInDB] = []
+    endpoints: List[EndpointInDB] = []
+
+
+# Endpoint Resource Association Schemas
+class EndpointResourceAssign(BaseModel):
+    resource_id: Optional[str] = None
+
+
+# Authorization Model View Schemas (Identity -> Role -> Resources)
+class AuthModelResourceItem(BaseModel):
+    resource_id: str
+    resource_name: str
+    resource_type: str
+    instance_id: Optional[str] = None
+    ownership_type: str = "owner"
+    associated_endpoints: List[str] = []
+
+
+class AuthModelIdentityNode(BaseModel):
+    identity_id: str
+    identity_name: str
+    role_id: Optional[str] = None
+    role_name: str = "Unassigned"
+    auth_type: str
+    environment: str
+    credential_status: str
+    resources: List[AuthModelResourceItem] = []
+
+
+class AuthorizationModelView(BaseModel):
+    project_id: int
+    project_name: str
+    nodes: List[AuthModelIdentityNode] = []
+    total_identities: int = 0
+    total_roles: int = 0
+    total_resources: int = 0

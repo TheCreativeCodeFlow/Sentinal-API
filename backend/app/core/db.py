@@ -3,19 +3,24 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://sentinel:sentinel@db:5432/sentinel",
-)
+def get_database_url():
+    return os.getenv(
+        "DATABASE_URL",
+        "postgresql://sentinel:sentinel@db:5432/sentinel",
+    )
+
 
 Base = declarative_base()
 
 
 def get_engine():
     """Get the appropriate database engine."""
+    db_url = get_database_url()
+    connect_args = {"check_same_thread": False} if db_url.startswith("sqlite") else {}
     return create_engine(
-        DATABASE_URL,
-        pool_pre_ping=True,
+        db_url,
+        pool_pre_ping=not db_url.startswith("sqlite"),
+        connect_args=connect_args,
         echo=False,
     )
 

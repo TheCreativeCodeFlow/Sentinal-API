@@ -9,24 +9,34 @@ from app.models import Base
 from app.core.db import get_db
 
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://sentinel:sentinel@localhost:5432/sentinel")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./test.db")
+os.environ["DATABASE_URL"] = DATABASE_URL
 
 
 @pytest.fixture(scope="session")
 def db_engine():
-    """Create test database engine using PostgreSQL."""
-    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    """Create test database engine using PostgreSQL or SQLite."""
+    is_sqlite = DATABASE_URL.startswith("sqlite")
+    connect_args = {"check_same_thread": False} if is_sqlite else {}
+    engine = create_engine(DATABASE_URL, pool_pre_ping=not is_sqlite, connect_args=connect_args)
     
-    # Drop all tables and indexes completely
-    with engine.connect() as conn:
-        conn.execute(text("""
-            DROP TABLE IF EXISTS endpoints CASCADE;
-            DROP TABLE IF EXISTS schemas CASCADE;
-            DROP TABLE IF EXISTS auth_schemes CASCADE;
-            DROP TABLE IF EXISTS apis CASCADE;
-            DROP TABLE IF EXISTS projects CASCADE;
-        """))
-        conn.commit()
+    if is_sqlite:
+        Base.metadata.drop_all(bind=engine)
+    else:
+        # Drop all tables and indexes completely
+        with engine.connect() as conn:
+            conn.execute(text("""
+                DROP TABLE IF EXISTS resource_ownerships CASCADE;
+                DROP TABLE IF EXISTS identities CASCADE;
+                DROP TABLE IF EXISTS roles CASCADE;
+                DROP TABLE IF EXISTS endpoints CASCADE;
+                DROP TABLE IF EXISTS resources CASCADE;
+                DROP TABLE IF EXISTS schemas CASCADE;
+                DROP TABLE IF EXISTS auth_schemes CASCADE;
+                DROP TABLE IF EXISTS apis CASCADE;
+                DROP TABLE IF EXISTS projects CASCADE;
+            """))
+            conn.commit()
     
     Base.metadata.create_all(bind=engine)
     yield engine
@@ -37,11 +47,15 @@ def db_engine():
 def db_session(db_engine):
     """Create a new session for each test, truncating tables for clean state."""
     from app.models import Base
+    is_sqlite = str(db_engine.url).startswith("sqlite")
     
     # Truncate all tables for clean state
     with db_engine.connect() as conn:
         for table in reversed(Base.metadata.sorted_tables):
-            conn.execute(text(f'TRUNCATE TABLE "{table.name}" RESTART IDENTITY CASCADE'))
+            if is_sqlite:
+                conn.execute(text(f'DELETE FROM "{table.name}"'))
+            else:
+                conn.execute(text(f'TRUNCATE TABLE "{table.name}" RESTART IDENTITY CASCADE'))
         conn.commit()
     
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=db_engine)

@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 import yaml
 from fastapi import HTTPException, status
 from pydantic import ValidationError
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, Session
 
 from app.core.db import get_engine, Base
 from app.models import Project, API, Endpoint, Schema, AuthScheme
@@ -108,35 +108,31 @@ def extract_endpoints(spec: Dict[str, Any], source: str = "openapi_spec") -> Lis
                 if not isinstance(tags, list):
                     tags = [tags] if tags else []
                 
-                endpoint_data = {
-                    "path": path_path,
+                endpoints.append({
                     "method": method.upper(),
+                    "path": path_path,
                     "summary": operation.get("summary"),
                     "description": operation.get("description"),
-                    "tags": tags,
                     "parameters": parameters,
                     "request_schema": request_schema,
                     "response_schemas": response_schemas,
-                }
-                endpoints.append(endpoint_data)
+                    "tags": tags,
+                })
     
     return endpoints
 
 
 def extract_auth_schemes(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Extract authentication schemes from OpenAPI spec security schemes."""
-    schemes = []
+    """Extract authentication schemes from OpenAPI spec."""
     components = spec.get("components", {})
     security_schemes = components.get("securitySchemes", {})
     
-    if not isinstance(security_schemes, dict):
-        security_schemes = {}
-    
+    schemes = []
     for name, scheme in security_schemes.items():
         if not isinstance(scheme, dict):
             continue
         
-        scheme_type = scheme.get("type", "")
+        scheme_type = scheme.get("type", "apiKey")
         scheme_data = {
             "name": name,
             "type": scheme_type,
@@ -150,14 +146,17 @@ def extract_auth_schemes(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
     return schemes
 
 
-def ingest_openapi(spec_content: str, project_id: int, api_name: Optional[str] = None, api_version: Optional[str] = None) -> Dict[str, Any]:
+def ingest_openapi(spec_content: str, project_id: int, api_name: Optional[str] = None, api_version: Optional[str] = None, db: Optional[Session] = None) -> Dict[str, Any]:
     """Full OpenAPI ingestion pipeline."""
     spec, fmt = parse_openapi_spec(spec_content)
     
     endpoints = extract_endpoints(spec)
     auth_schemes = extract_auth_schemes(spec)
     
-    db = get_session()
+    own_session = False
+    if db is None:
+        db = get_session()
+        own_session = True
     try:
         project = db.query(Project).filter(Project.id == project_id).first()
         if not project:
@@ -282,4 +281,5 @@ def ingest_openapi(spec_content: str, project_id: int, api_name: Optional[str] =
             detail=f"Failed to ingest OpenAPI spec: {str(e)}",
         )
     finally:
-        db.close()
+        if own_session:
+            db.close()

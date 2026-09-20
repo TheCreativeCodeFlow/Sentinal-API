@@ -47,10 +47,11 @@ function SelectContent({ items, onValueChange, value }: SelectContentProps) {
       {items.map((item) => (
         <button
           key={item.value}
+          type="button"
           onClick={() => onValueChange(item.value)}
           className={cn(
-            "flex cursor-pointer select-none items-center rounded-sm px-2 py-1.5 text-sm select-none outline-none hover:bg-accent hover:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
-            "motion-safe",
+            "flex w-full cursor-pointer select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground",
+            item.value === value && "bg-accent/50 font-medium text-foreground",
           )}
         >
           {item.label || item.value}
