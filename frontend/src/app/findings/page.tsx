@@ -27,6 +27,9 @@ interface FindingItem {
   project_id: number;
   security_test_id: string;
   execution_id: string;
+  endpoint_id?: number | null;
+  attacker_identity_id?: string | null;
+  attacker_role_id?: string | null;
   type: string;
   severity: string;
   confidence: string;
@@ -34,10 +37,13 @@ interface FindingItem {
   title: string;
   description: string;
   remediation: string;
+  expected_authorization?: string | null;
+  actual_behavior?: string | null;
   created_at: string;
   endpoint_method: string | null;
   endpoint_path: string | null;
   attacker_identity_name: string | null;
+  attacker_role_name?: string | null;
   victim_resource_name: string | null;
   victim_resource_instance_id: string | null;
 }
@@ -57,6 +63,7 @@ export default function FindingsPage() {
   const [reloadKey, setReloadKey] = useState(0);
 
   // Filters
+  const [typeFilter, setTypeFilter] = useState<string>("ALL");
   const [severityFilter, setSeverityFilter] = useState<string>("ALL");
   const [statusFilter, setStatusFilter] = useState<string>("ALL");
 
@@ -83,6 +90,8 @@ export default function FindingsPage() {
             const params = new URLSearchParams(window.location.search);
             const pParam = params.get("project_id");
             if (pParam) initialId = Number(pParam);
+            const tParam = params.get("type_filter");
+            if (tParam) setTypeFilter(tParam.toUpperCase());
           }
           if (initialId !== null) {
             setSelectedProjectId((prev) => (prev === null ? initialId : prev));
@@ -111,6 +120,7 @@ export default function FindingsPage() {
       try {
         let url = `/api/v1/projects/${selectedProjectId}/findings/`;
         const qParams: string[] = [];
+        if (typeFilter !== "ALL") qParams.push(`type_filter=${typeFilter}`);
         if (severityFilter !== "ALL") qParams.push(`severity=${severityFilter}`);
         if (statusFilter !== "ALL") qParams.push(`status_filter=${statusFilter}`);
         if (qParams.length > 0) url += `?${qParams.join("&")}`;
@@ -134,7 +144,7 @@ export default function FindingsPage() {
     return () => {
       ignore = true;
     };
-  }, [selectedProjectId, severityFilter, statusFilter, reloadKey]);
+  }, [selectedProjectId, typeFilter, severityFilter, statusFilter, reloadKey]);
 
   const handleOpenDetail = async (findingId: string) => {
     setLoadingDetail(true);
@@ -198,7 +208,7 @@ export default function FindingsPage() {
         <div>
           <h1 className="text-2xl font-bold">Security Findings</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Confirmed authorization vulnerabilities with reproducible evidence and remediation guidance.
+            Confirmed authorization vulnerabilities (BOLA & BFLA) with reproducible evidence and remediation guidance.
           </p>
         </div>
         {projects.length > 0 && (
@@ -219,6 +229,19 @@ export default function FindingsPage() {
 
       {/* Filters */}
       <div className="flex flex-wrap items-center gap-4 border-b border-border pb-4">
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted-foreground">Type:</span>
+          <select
+            className="h-8 rounded-md border border-input bg-background px-2.5 text-xs shadow-xs"
+            value={typeFilter}
+            onChange={(e) => setTypeFilter(e.target.value)}
+          >
+            <option value="ALL">All Types</option>
+            <option value="BOLA">BOLA (Resource Level)</option>
+            <option value="BFLA">BFLA (Function Level)</option>
+          </select>
+        </div>
+
         <div className="flex items-center gap-2">
           <span className="text-xs text-muted-foreground">Severity:</span>
           <select
@@ -271,54 +294,85 @@ export default function FindingsPage() {
             </div>
             <h3 className="font-medium text-foreground">No Findings Found</h3>
             <p className="text-xs max-w-sm mx-auto">
-              No authorization vulnerabilities have been confirmed for the current filters. Run BOLA tests from the Security Tests tab.
+              No authorization vulnerabilities have been confirmed for the current filters. Run BOLA or BFLA tests from the Security Tests tab.
             </p>
           </CardContent>
         </Card>
       ) : (
         <div className="grid grid-cols-1 gap-3">
-          {findings.map((finding) => (
-            <Card
-              key={finding.id}
-              className="p-5 border-border hover:border-foreground/20 transition-all cursor-pointer"
-              onClick={() => handleOpenDetail(finding.id)}
-            >
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <div className="space-y-1.5">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span
-                      className={`text-xs font-bold px-2 py-0.5 rounded border ${getSeverityBadge(
-                        finding.severity
-                      )}`}
-                    >
-                      {finding.severity}
-                    </span>
-                    <span className="text-xs font-mono font-semibold px-2 py-0.5 rounded bg-secondary text-secondary-foreground">
-                      {finding.type}
-                    </span>
-                    <span className="text-xs font-semibold px-2 py-0.5 rounded bg-muted text-muted-foreground">
-                      Confidence: {finding.confidence}
-                    </span>
-                    <span className="text-xs font-mono font-bold">
-                      {finding.endpoint_method} {finding.endpoint_path}
-                    </span>
+          {findings.map((finding) => {
+            const isBFLA = finding.type.toUpperCase() === "BFLA";
+            return (
+              <Card
+                key={finding.id}
+                className="p-5 border-border hover:border-foreground/20 transition-all cursor-pointer"
+                onClick={() => handleOpenDetail(finding.id)}
+              >
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="space-y-1.5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span
+                        className={`text-xs font-bold px-2 py-0.5 rounded border ${getSeverityBadge(
+                          finding.severity
+                        )}`}
+                      >
+                        {finding.severity}
+                      </span>
+                      <span
+                        className={`text-xs font-mono font-bold px-2 py-0.5 rounded border ${
+                          isBFLA
+                            ? "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20"
+                            : "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20"
+                        }`}
+                      >
+                        {finding.type}
+                      </span>
+                      <span className="text-xs font-semibold px-2 py-0.5 rounded bg-muted text-muted-foreground">
+                        Confidence: {finding.confidence}
+                      </span>
+                      <span className="text-xs font-mono font-bold">
+                        {finding.endpoint_method} {finding.endpoint_path}
+                      </span>
+                    </div>
+
+                    <h3 className="font-bold text-foreground text-sm">{finding.title}</h3>
+                    <p className="text-xs text-muted-foreground line-clamp-1">{finding.description}</p>
+
+                    <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground pt-1">
+                      <div>
+                        <span className="font-semibold text-foreground">Attacker:</span>{" "}
+                        {finding.attacker_identity_name || "Unknown"}
+                        {finding.attacker_role_name && (
+                          <span className="ml-1 text-[11px] text-muted-foreground">({finding.attacker_role_name})</span>
+                        )}
+                      </div>
+                      {!isBFLA && finding.victim_resource_name && (
+                        <div>
+                          <span className="font-semibold text-foreground">Resource:</span>{" "}
+                          {finding.victim_resource_name} ({finding.victim_resource_instance_id})
+                        </div>
+                      )}
+                      {isBFLA && finding.expected_authorization && (
+                        <div>
+                          <span className="font-semibold text-foreground">Expected:</span>{" "}
+                          <span className="text-rose-600 font-semibold">{finding.expected_authorization}</span>
+                        </div>
+                      )}
+                    </div>
                   </div>
 
-                  <h3 className="font-bold text-foreground text-sm">{finding.title}</h3>
-                  <p className="text-xs text-muted-foreground line-clamp-1">{finding.description}</p>
+                  <div className="flex items-center gap-4 shrink-0">
+                    <span className="text-xs text-muted-foreground">
+                      {new Date(finding.created_at).toLocaleDateString()}
+                    </span>
+                    <Button variant="secondary" size="sm">
+                      View Details
+                    </Button>
+                  </div>
                 </div>
-
-                <div className="flex items-center gap-4 shrink-0">
-                  <span className="text-xs text-muted-foreground">
-                    {new Date(finding.created_at).toLocaleDateString()}
-                  </span>
-                  <Button variant="secondary" size="sm">
-                    View Details
-                  </Button>
-                </div>
-              </div>
-            </Card>
-          ))}
+              </Card>
+            );
+          })}
         </div>
       )}
 
@@ -337,7 +391,13 @@ export default function FindingsPage() {
                   >
                     {selectedFinding.severity}
                   </span>
-                  <span className="text-xs font-mono font-semibold px-2 py-0.5 rounded bg-secondary">
+                  <span
+                    className={`text-xs font-mono font-bold px-2 py-0.5 rounded border ${
+                      selectedFinding.type.toUpperCase() === "BFLA"
+                        ? "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20"
+                        : "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20"
+                    }`}
+                  >
                     {selectedFinding.type}
                   </span>
                   <span className="text-xs font-semibold px-2 py-0.5 rounded bg-muted">
@@ -372,24 +432,58 @@ export default function FindingsPage() {
               </div>
             )}
 
+            {/* BFLA Violated Boundary Alert Box */}
+            {selectedFinding.type.toUpperCase() === "BFLA" && (
+              <div className="p-3.5 rounded-lg border border-purple-500/30 bg-purple-500/10 text-purple-900 dark:text-purple-200 text-xs space-y-1">
+                <div className="font-semibold flex items-center gap-2">
+                  <span>🛡️</span>
+                  <span>Violated Authorization Boundary</span>
+                </div>
+                <p className="leading-relaxed">
+                  Principal <strong>{selectedFinding.attacker_identity_name || "Attacker"}</strong>{" "}
+                  with assigned role <strong>{selectedFinding.attacker_role_name || "Unassigned"}</strong>{" "}
+                  was granted unauthorized access to function endpoint{" "}
+                  <code className="font-mono font-bold bg-background/50 px-1 py-0.5 rounded">
+                    {selectedFinding.endpoint_method} {selectedFinding.endpoint_path}
+                  </code>.
+                  The configured boundary rule required access to be{" "}
+                  <strong>{selectedFinding.expected_authorization || "DENY"}</strong>.
+                </p>
+              </div>
+            )}
+
             {/* Finding Attributes Grid */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
               <div className="p-3 rounded-lg bg-card/60 border border-border space-y-1">
-                <span className="font-semibold text-muted-foreground uppercase">ATTACKER</span>
+                <span className="font-semibold text-muted-foreground uppercase">ATTACKER & ROLE</span>
                 <p className="text-foreground font-medium text-sm">
                   {selectedFinding.attacker_identity_name || "Configured Test Identity"}
+                  {selectedFinding.attacker_role_name && (
+                    <span className="text-xs text-muted-foreground ml-2">
+                      (Role: {selectedFinding.attacker_role_name})
+                    </span>
+                  )}
                 </p>
               </div>
 
-              <div className="p-3 rounded-lg bg-card/60 border border-border space-y-1">
-                <span className="font-semibold text-muted-foreground uppercase">VICTIM RESOURCE</span>
-                <p className="text-foreground font-medium text-sm">
-                  {selectedFinding.victim_resource_name || "Resource"} ({selectedFinding.victim_resource_instance_id})
-                </p>
-              </div>
+              {selectedFinding.type.toUpperCase() === "BOLA" ? (
+                <div className="p-3 rounded-lg bg-card/60 border border-border space-y-1">
+                  <span className="font-semibold text-muted-foreground uppercase">VICTIM RESOURCE</span>
+                  <p className="text-foreground font-medium text-sm">
+                    {selectedFinding.victim_resource_name || "Resource"} ({selectedFinding.victim_resource_instance_id})
+                  </p>
+                </div>
+              ) : (
+                <div className="p-3 rounded-lg bg-card/60 border border-border space-y-1">
+                  <span className="font-semibold text-muted-foreground uppercase">EXPECTED BOUNDARY</span>
+                  <p className="text-rose-600 font-mono font-bold text-sm">
+                    {selectedFinding.expected_authorization || "DENY"}
+                  </p>
+                </div>
+              )}
 
               <div className="p-3 rounded-lg bg-card/60 border border-border space-y-1 sm:col-span-2">
-                <span className="font-semibold text-muted-foreground uppercase">ENDPOINT</span>
+                <span className="font-semibold text-muted-foreground uppercase">TARGET ENDPOINT</span>
                 <p className="text-foreground font-mono text-sm font-bold">
                   {selectedFinding.endpoint_method} {selectedFinding.endpoint_path}
                 </p>
@@ -404,7 +498,9 @@ export default function FindingsPage() {
                 </span>
                 <p className="text-muted-foreground">
                   {selectedFinding.expected_behavior ||
-                    "Cross-owner access must be denied with HTTP 401, 403, or 404 without exposing victim resource data."}
+                    (selectedFinding.type.toUpperCase() === "BFLA"
+                      ? `Access to function endpoint must be rejected (HTTP 401 or 403) for role '${selectedFinding.attacker_role_name || "unassigned"}'.`
+                      : "Cross-owner access must be denied with HTTP 401, 403, or 404 without exposing victim resource data.")}
                 </p>
               </div>
 

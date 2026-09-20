@@ -11,6 +11,7 @@ const menuItems = [
   { href: "/roles", label: "Roles", key: "5" },
   { href: "/resources", label: "Resources", key: "6" },
   { href: "/auth-model", label: "Auth Model", key: "7" },
+  { href: "/authorization-matrix", label: "Auth Matrix", key: "7b" },
   { href: "/security-tests", label: "Security Tests", key: "8" },
   { href: "/findings", label: "Findings", key: "9" },
   { href: "/attack-surface", label: "Attack Surface", key: "10" },

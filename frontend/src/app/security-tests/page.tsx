@@ -26,6 +26,8 @@ interface Identity {
   id: string;
   name: string;
   auth_type: string;
+  role_id?: string | null;
+  role_name?: string | null;
   has_credential: boolean;
 }
 
@@ -52,12 +54,14 @@ interface SecurityTestItem {
   test_type: string;
   attacker_identity_id: string;
   attacker_identity_name: string | null;
+  attacker_role_name?: string | null;
   victim_identity_id: string | null;
   victim_identity_name: string | null;
   victim_resource_id: string | null;
   victim_resource_name: string | null;
   victim_resource_instance_id: string | null;
   attacker_resource_instance_id: string | null;
+  expected_access?: string | null;
   status: string;
   latest_result: string | null;
   executions_count: number;
@@ -90,6 +94,10 @@ export default function SecurityTestsPage() {
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
 
+  // Filters
+  const [testTypeFilter, setTestTypeFilter] = useState<string>("ALL");
+  const [resultFilter, setResultFilter] = useState<string>("ALL");
+
   // Execution state
   const [executingTestId, setExecutingTestId] = useState<string | null>(null);
   const [executionHistoryTest, setExecutionHistoryTest] = useState<SecurityTestItem | null>(null);
@@ -98,6 +106,8 @@ export default function SecurityTestsPage() {
 
   // Create Test Modal state
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [selectedTestType, setSelectedTestType] = useState<"BOLA" | "BFLA">("BOLA");
+  const [expectedAccess, setExpectedAccess] = useState<"DENY" | "ALLOW">("DENY");
   const [selectedEndpointId, setSelectedEndpointId] = useState<number | "">("");
   const [selectedAttackerId, setSelectedAttackerId] = useState<string>("");
   const [selectedVictimId, setSelectedVictimId] = useState<string>("");
@@ -198,13 +208,12 @@ export default function SecurityTestsPage() {
     };
   }, [selectedProjectId, reloadKey]);
 
-  // When endpoint is selected in create modal, auto-fill resource and ownership instances
+  // When endpoint is selected in create modal, auto-fill resource and ownership instances for BOLA
   const handleEndpointSelect = (epId: number) => {
     setSelectedEndpointId(epId);
     const ep = endpoints.find((e) => e.id === epId);
-    if (ep && ep.resource_id) {
+    if (ep && ep.resource_id && selectedTestType === "BOLA") {
       setSelectedResourceId(ep.resource_id);
-      // Look for ownership instances on this resource
       const relOwnerships = ownerships.filter((o) => o.resource_id === ep.resource_id);
       if (relOwnerships.length > 0 && !victimInstanceId) {
         setVictimInstanceId(relOwnerships[0].resource_instance_id || "");
@@ -233,23 +242,42 @@ export default function SecurityTestsPage() {
 
   const handleCreateTest = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedProjectId || !selectedEndpointId || !selectedAttackerId || !victimInstanceId) {
+    if (!selectedProjectId || !selectedEndpointId || !selectedAttackerId) {
       return;
     }
+    if (selectedTestType === "BOLA" && !victimInstanceId.trim()) {
+      return;
+    }
+
     setSubmitting(true);
     try {
+      const payload =
+        selectedTestType === "BOLA"
+          ? {
+              endpoint_id: Number(selectedEndpointId),
+              test_type: "BOLA",
+              attacker_identity_id: selectedAttackerId,
+              victim_identity_id: selectedVictimId || null,
+              victim_resource_id: selectedResourceId || null,
+              victim_resource_instance_id: victimInstanceId.trim(),
+              attacker_resource_instance_id: attackerInstanceId.trim() || null,
+              expected_access: expectedAccess,
+            }
+          : {
+              endpoint_id: Number(selectedEndpointId),
+              test_type: "BFLA",
+              attacker_identity_id: selectedAttackerId,
+              expected_access: expectedAccess,
+              victim_identity_id: null,
+              victim_resource_id: null,
+              victim_resource_instance_id: null,
+              attacker_resource_instance_id: null,
+            };
+
       const res = await fetch(`/api/v1/projects/${selectedProjectId}/security-tests/`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          endpoint_id: Number(selectedEndpointId),
-          test_type: "BOLA",
-          attacker_identity_id: selectedAttackerId,
-          victim_identity_id: selectedVictimId || null,
-          victim_resource_id: selectedResourceId || null,
-          victim_resource_instance_id: victimInstanceId.trim(),
-          attacker_resource_instance_id: attackerInstanceId.trim() || null,
-        }),
+        body: JSON.stringify(payload),
         credentials: "include",
       });
 
@@ -265,6 +293,7 @@ export default function SecurityTestsPage() {
       setSelectedResourceId("");
       setVictimInstanceId("");
       setAttackerInstanceId("");
+      setExpectedAccess("DENY");
       setReloadKey((k) => k + 1);
     } catch (err: unknown) {
       alert("Error: " + (err instanceof Error ? err.message : "Creation failed"));
@@ -313,7 +342,26 @@ export default function SecurityTestsPage() {
   const isEpLinked = !!selectedEpObj?.resource_id;
   const selectedAttackerObj = identities.find((i) => i.id === selectedAttackerId);
   const attackerHasAuth = !!selectedAttackerObj;
-  const canSubmit = isTargetAuthorized && isSafeMethod && isEpLinked && attackerHasAuth && !!victimInstanceId.trim();
+
+  const canSubmit =
+    selectedTestType === "BOLA"
+      ? isTargetAuthorized && isSafeMethod && isEpLinked && attackerHasAuth && !!victimInstanceId.trim()
+      : isTargetAuthorized && isSafeMethod && attackerHasAuth && !!selectedEndpointId;
+
+  // Filtered test list
+  const filteredTests = tests.filter((t) => {
+    if (testTypeFilter !== "ALL" && t.test_type.toUpperCase() !== testTypeFilter.toUpperCase()) {
+      return false;
+    }
+    if (resultFilter !== "ALL") {
+      if (resultFilter === "UNTESTED") {
+        if (t.latest_result) return false;
+      } else if (t.latest_result !== resultFilter) {
+        return false;
+      }
+    }
+    return true;
+  });
 
   return (
     <div className="space-y-6">
@@ -322,7 +370,7 @@ export default function SecurityTestsPage() {
         <div>
           <h1 className="text-2xl font-bold">Controlled Security Testing Engine</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Execute controlled Broken Object Level Authorization (BOLA) tests against authorized endpoints.
+            Execute controlled BOLA (Resource Level) and BFLA (Function Level) boundary tests against authorized targets.
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -344,7 +392,7 @@ export default function SecurityTestsPage() {
             onClick={() => setShowCreateModal(true)}
             disabled={!selectedProjectId || !isTargetAuthorized}
           >
-            + Configure BOLA Test
+            + Configure Test
           </Button>
         </div>
       </div>
@@ -367,6 +415,44 @@ export default function SecurityTestsPage() {
         </div>
       )}
 
+      {/* Filter Toolbar */}
+      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-border pb-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">Type:</span>
+            <select
+              className="h-8 rounded-md border border-input bg-background px-2.5 text-xs shadow-xs"
+              value={testTypeFilter}
+              onChange={(e) => setTestTypeFilter(e.target.value)}
+            >
+              <option value="ALL">All Types</option>
+              <option value="BOLA">BOLA (Resource Authorization)</option>
+              <option value="BFLA">BFLA (Function-Level Authorization)</option>
+            </select>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">Result:</span>
+            <select
+              className="h-8 rounded-md border border-input bg-background px-2.5 text-xs shadow-xs"
+              value={resultFilter}
+              onChange={(e) => setResultFilter(e.target.value)}
+            >
+              <option value="ALL">All Results</option>
+              <option value="CONFIRMED">Vulnerability Confirmed</option>
+              <option value="PASS">Passed (Enforced)</option>
+              <option value="INCONCLUSIVE">Inconclusive</option>
+              <option value="ERROR">Error</option>
+              <option value="UNTESTED">Untested</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="text-xs text-muted-foreground">
+          Showing {filteredTests.length} of {tests.length} configured test(s)
+        </div>
+      </div>
+
       {error && (
         <div className="p-4 rounded-xl bg-destructive/10 border border-destructive text-destructive text-sm">
           {error}
@@ -378,33 +464,42 @@ export default function SecurityTestsPage() {
         <div className="p-12 text-center text-muted-foreground animate-pulse border border-border rounded-xl">
           Loading security tests...
         </div>
-      ) : tests.length === 0 ? (
+      ) : filteredTests.length === 0 ? (
         <Card>
           <CardContent className="py-12 text-center text-muted-foreground space-y-3">
             <div className="w-12 h-12 rounded-full bg-primary/10 text-primary mx-auto flex items-center justify-center text-xl font-bold">
               🛡️
             </div>
-            <h3 className="font-medium text-foreground">No Security Tests Configured</h3>
+            <h3 className="font-medium text-foreground">No Security Tests Found</h3>
             <p className="text-xs max-w-md mx-auto">
-              Configure your first BOLA test by selecting an endpoint associated with a domain resource, an attacker identity, and a victim resource instance.
+              {tests.length === 0
+                ? "Configure your first controlled BOLA or BFLA test, or generate tests automatically from the Authorization Matrix tab."
+                : "No tests matched the selected filter criteria."}
             </p>
-            {isTargetAuthorized && (
+            {isTargetAuthorized && tests.length === 0 && (
               <Button size="sm" onClick={() => setShowCreateModal(true)}>
-                Configure BOLA Test
+                Configure Security Test
               </Button>
             )}
           </CardContent>
         </Card>
       ) : (
         <div className="grid grid-cols-1 gap-4">
-          {tests.map((test) => {
+          {filteredTests.map((test) => {
             const isExecuting = executingTestId === test.id;
+            const isBFLA = test.test_type.toUpperCase() === "BFLA";
             return (
               <Card key={test.id} className="overflow-hidden border-border">
                 <div className="p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
                   <div className="space-y-2">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-xs font-mono font-semibold px-2 py-0.5 rounded bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
+                      <span
+                        className={`text-xs font-mono font-bold px-2 py-0.5 rounded border ${
+                          isBFLA
+                            ? "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20"
+                            : "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20"
+                        }`}
+                      >
                         {test.test_type}
                       </span>
                       <span className="text-xs font-bold font-mono px-2 py-0.5 rounded bg-secondary text-secondary-foreground">
@@ -415,12 +510,12 @@ export default function SecurityTestsPage() {
                       {/* Result Badge */}
                       {test.latest_result === "CONFIRMED" && (
                         <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-red-500/20 text-red-700 dark:text-red-300 border border-red-500/30 animate-pulse">
-                          CONFIRMED BOLA
+                          {isBFLA ? "CONFIRMED BFLA" : "CONFIRMED BOLA"}
                         </span>
                       )}
                       {test.latest_result === "PASS" && (
                         <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30">
-                          PASSED (Access Denied)
+                          {isBFLA ? "PASSED (Boundary Enforced)" : "PASSED (Access Denied)"}
                         </span>
                       )}
                       {test.latest_result === "INCONCLUSIVE" && (
@@ -444,10 +539,28 @@ export default function SecurityTestsPage() {
                       <div>
                         <span className="font-semibold text-foreground">Attacker:</span>{" "}
                         {test.attacker_identity_name || "Unknown"}
+                        {test.attacker_role_name && (
+                          <span className="ml-1 text-[11px] text-muted-foreground">({test.attacker_role_name})</span>
+                        )}
                       </div>
                       <div>
-                        <span className="font-semibold text-foreground">Victim Resource:</span>{" "}
-                        {test.victim_resource_name || "Resource"} ({test.victim_resource_instance_id})
+                        {isBFLA ? (
+                          <>
+                            <span className="font-semibold text-foreground">Expected Access:</span>{" "}
+                            <span
+                              className={`font-semibold ${
+                                test.expected_access === "ALLOW" ? "text-emerald-600" : "text-rose-600"
+                              }`}
+                            >
+                              {test.expected_access || "DENY"}
+                            </span>
+                          </>
+                        ) : (
+                          <>
+                            <span className="font-semibold text-foreground">Victim Resource:</span>{" "}
+                            {test.victim_resource_name || "Resource"} ({test.victim_resource_instance_id})
+                          </>
+                        )}
                       </div>
                       <div>
                         <span className="font-semibold text-foreground">Runs:</span> {test.executions_count} run(s)
@@ -468,7 +581,7 @@ export default function SecurityTestsPage() {
                     </Button>
 
                     {test.findings_count > 0 && (
-                      <Link href={`/findings`}>
+                      <Link href={`/findings?project_id=${selectedProjectId}&type_filter=${test.test_type}`}>
                         <Button variant="outline" size="sm" className="border-red-500/30 text-red-600 hover:bg-red-500/10">
                           View Finding
                         </Button>
@@ -491,17 +604,48 @@ export default function SecurityTestsPage() {
         </div>
       )}
 
-      {/* Create BOLA Test Modal */}
+      {/* Create Security Test Modal */}
       {showCreateModal && (
         <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-card border border-border rounded-xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto p-6 space-y-5">
             <div className="flex items-center justify-between border-b border-border pb-3">
-              <h2 className="text-lg font-bold">Configure Controlled BOLA Test</h2>
+              <div>
+                <h2 className="text-lg font-bold">Configure Controlled Security Test</h2>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Select authorization test type to evaluate boundary compliance safely.
+                </p>
+              </div>
               <button
                 className="text-muted-foreground hover:text-foreground text-sm font-semibold"
                 onClick={() => setShowCreateModal(false)}
               >
                 ✕
+              </button>
+            </div>
+
+            {/* Test Type Switcher Tabs */}
+            <div className="flex border border-border rounded-lg p-1 bg-muted/40">
+              <button
+                type="button"
+                onClick={() => setSelectedTestType("BOLA")}
+                className={`flex-1 py-1.5 px-3 rounded-md text-xs font-semibold transition-all ${
+                  selectedTestType === "BOLA"
+                    ? "bg-card text-foreground shadow-xs"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                BOLA (Resource Authorization)
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedTestType("BFLA")}
+                className={`flex-1 py-1.5 px-3 rounded-md text-xs font-semibold transition-all ${
+                  selectedTestType === "BFLA"
+                    ? "bg-card text-foreground shadow-xs"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                BFLA (Function-Level Authorization)
               </button>
             </div>
 
@@ -517,7 +661,7 @@ export default function SecurityTestsPage() {
                   onChange={(e) => handleEndpointSelect(Number(e.target.value))}
                   required
                 >
-                  <option value="">-- Select an endpoint with associated resource --</option>
+                  <option value="">-- Select safe GET/HEAD endpoint --</option>
                   {endpoints
                     .filter((ep) => ["GET", "HEAD"].includes(ep.method.toUpperCase()))
                     .map((ep) => (
@@ -526,9 +670,9 @@ export default function SecurityTestsPage() {
                       </option>
                     ))}
                 </select>
-                {selectedEpObj && !selectedEpObj.resource_id && (
+                {selectedTestType === "BOLA" && selectedEpObj && !selectedEpObj.resource_id && (
                   <p className="text-xs text-destructive mt-1">
-                    ⚠️ This endpoint is not linked to a domain resource. Associate it under the Resources tab first.
+                    ⚠️ BOLA requires an endpoint linked to a domain resource. Link it under Resources or switch to BFLA testing.
                   </p>
                 )}
               </div>
@@ -536,7 +680,7 @@ export default function SecurityTestsPage() {
               {/* Attacker Identity */}
               <div>
                 <label className="text-xs font-semibold text-muted-foreground uppercase">
-                  2. Attacker Identity (Authorized Principal) *
+                  2. Attacker Identity & Role *
                 </label>
                 <select
                   className="mt-1 w-full h-9 rounded-md border border-input bg-background px-3 py-1 text-sm shadow-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
@@ -547,65 +691,91 @@ export default function SecurityTestsPage() {
                   <option value="">-- Select attacker identity --</option>
                   {identities.map((ident) => (
                     <option key={ident.id} value={ident.id}>
-                      {ident.name} ({ident.auth_type})
+                      {ident.name} (Role: {ident.role_name || "Unassigned"}, {ident.auth_type})
                     </option>
                   ))}
                 </select>
                 <p className="text-xs text-muted-foreground mt-1">
-                  The test engine uses this identity&apos;s configured credentials to request the victim&apos;s resource.
+                  {selectedTestType === "BFLA"
+                    ? "Evaluates whether this identity/role can access the endpoint according to the authorization matrix."
+                    : "The test engine uses this identity's configured credentials to request the victim's resource."}
                 </p>
               </div>
 
-              {/* Victim Resource & Instance ID */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {/* BFLA Specific: Expected Access */}
+              {selectedTestType === "BFLA" && (
                 <div>
                   <label className="text-xs font-semibold text-muted-foreground uppercase">
-                    3. Victim Resource
+                    3. Expected Access Boundary *
                   </label>
                   <select
                     className="mt-1 w-full h-9 rounded-md border border-input bg-background px-3 py-1 text-sm shadow-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                    value={selectedResourceId}
-                    onChange={(e) => setSelectedResourceId(e.target.value)}
-                  >
-                    <option value="">-- Auto-select from endpoint --</option>
-                    {resources.map((res) => (
-                      <option key={res.id} value={res.id}>{res.name}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="text-xs font-semibold text-muted-foreground uppercase">
-                    Victim Resource Instance ID *
-                  </label>
-                  <Input
-                    className="mt-1 font-mono text-sm"
-                    placeholder="e.g. order_alice_101 or 123"
-                    value={victimInstanceId}
-                    onChange={(e) => setVictimInstanceId(e.target.value)}
+                    value={expectedAccess}
+                    onChange={(e) => setExpectedAccess(e.target.value as "DENY" | "ALLOW")}
                     required
-                  />
+                  >
+                    <option value="DENY">DENY (Boundary Test: Access should be rejected with 401/403)</option>
+                    <option value="ALLOW">ALLOW (Baseline Functional Test: Access should succeed with 200)</option>
+                  </select>
                   <p className="text-xs text-muted-foreground mt-1">
-                    Replaces path parameter like {`{id}`} or {`{order_id}`}.
+                    If set to DENY and the endpoint returns HTTP 200 with resource data, a CONFIRMED BFLA vulnerability finding is flagged.
                   </p>
                 </div>
-              </div>
+              )}
 
-              {/* Optional Attacker Baseline Instance ID */}
-              <div>
-                <label className="text-xs font-semibold text-muted-foreground uppercase">
-                  Attacker Baseline Instance ID (Optional)
-                </label>
-                <Input
-                  className="mt-1 font-mono text-sm"
-                  placeholder="e.g. order_bob_202"
-                  value={attackerInstanceId}
-                  onChange={(e) => setAttackerInstanceId(e.target.value)}
-                />
-                <p className="text-xs text-muted-foreground mt-1">
-                  Used to baseline normal authorized behavior for the attacker before executing the cross-owner probe.
-                </p>
-              </div>
+              {/* BOLA Specific: Victim Resource & Instance ID */}
+              {selectedTestType === "BOLA" && (
+                <>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-xs font-semibold text-muted-foreground uppercase">
+                        3. Victim Resource
+                      </label>
+                      <select
+                        className="mt-1 w-full h-9 rounded-md border border-input bg-background px-3 py-1 text-sm shadow-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        value={selectedResourceId}
+                        onChange={(e) => setSelectedResourceId(e.target.value)}
+                      >
+                        <option value="">-- Auto-select from endpoint --</option>
+                        {resources.map((res) => (
+                          <option key={res.id} value={res.id}>{res.name}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-semibold text-muted-foreground uppercase">
+                        Victim Resource Instance ID *
+                      </label>
+                      <Input
+                        className="mt-1 font-mono text-sm"
+                        placeholder="e.g. order_alice_101 or 123"
+                        value={victimInstanceId}
+                        onChange={(e) => setVictimInstanceId(e.target.value)}
+                        required
+                      />
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Replaces path parameter like {`{id}`} or {`{order_id}`}.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-semibold text-muted-foreground uppercase">
+                      Attacker Baseline Instance ID (Optional)
+                    </label>
+                    <Input
+                      className="mt-1 font-mono text-sm"
+                      placeholder="e.g. order_bob_202"
+                      value={attackerInstanceId}
+                      onChange={(e) => setAttackerInstanceId(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Used to baseline normal authorized behavior for the attacker before executing the cross-owner probe.
+                    </p>
+                  </div>
+                </>
+              )}
 
               {/* Safety & Pre-flight Validation Checklist */}
               <div className="p-3.5 rounded-lg border border-border bg-card/60 space-y-2 text-xs">
@@ -621,14 +791,29 @@ export default function SecurityTestsPage() {
                     <span>{isSafeMethod ? "✅" : "❌"}</span>
                     <span>Safe HTTP method (GET/HEAD)</span>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <span>{isEpLinked ? "✅" : "❌"}</span>
-                    <span>Endpoint linked to resource</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span>{victimInstanceId.trim() ? "✅" : "❌"}</span>
-                    <span>Victim instance ID provided</span>
-                  </div>
+                  {selectedTestType === "BOLA" ? (
+                    <>
+                      <div className="flex items-center gap-2">
+                        <span>{isEpLinked ? "✅" : "❌"}</span>
+                        <span>Endpoint linked to resource</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span>{victimInstanceId.trim() ? "✅" : "❌"}</span>
+                        <span>Victim instance ID provided</span>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="flex items-center gap-2">
+                        <span>{attackerHasAuth ? "✅" : "❌"}</span>
+                        <span>Attacker identity selected</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span>{expectedAccess ? "✅" : "❌"}</span>
+                        <span>Expected access configured ({expectedAccess})</span>
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -637,7 +822,7 @@ export default function SecurityTestsPage() {
                   Cancel
                 </Button>
                 <Button type="submit" disabled={!canSubmit || submitting}>
-                  {submitting ? "Saving..." : "Create BOLA Test"}
+                  {submitting ? "Saving..." : `Create ${selectedTestType} Test`}
                 </Button>
               </div>
             </form>
@@ -653,7 +838,7 @@ export default function SecurityTestsPage() {
               <div>
                 <h2 className="text-lg font-bold">Execution History</h2>
                 <p className="text-xs text-muted-foreground font-mono mt-0.5">
-                  {executionHistoryTest.endpoint_method} {executionHistoryTest.endpoint_path}
+                  [{executionHistoryTest.test_type}] {executionHistoryTest.endpoint_method} {executionHistoryTest.endpoint_path}
                 </p>
               </div>
               <button
