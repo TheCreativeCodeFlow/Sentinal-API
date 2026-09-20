@@ -16,6 +16,7 @@ from app.models import (
 )
 from app.services.security_engine.client import AsyncSecurityHttpClient, ExecutionResult
 from app.services.security_engine.auth_adapters import AuthAdapter
+from app.services.security_engine.response_analyzer import ResponseAnalyzer
 
 
 def substitute_resource_id(path: str, resource_instance_id: Optional[str]) -> str:
@@ -166,11 +167,19 @@ class BOLAEngine:
         execution.http_status = test_result.status_code
         execution.duration_ms = test_result.duration_ms
 
+        # Response Signature Analysis
+        response_signature = ResponseAnalyzer.analyze(
+            status_code=test_result.status_code or 0,
+            headers=test_result.redacted_headers,
+            body=test_result.body or "",
+        )
+
         # Classification Logic
         result, reason, error_category = self._classify_result(
             test_result=test_result,
             victim_instance_id=victim_instance_id,
             baseline_result=baseline_result,
+            response_signature=response_signature,
         )
 
         execution.status = "COMPLETED" if result != "ERROR" else "FAILED"
@@ -191,6 +200,7 @@ class BOLAEngine:
                 "status_code": test_result.status_code,
                 "headers": test_result.redacted_headers,
                 "duration_ms": test_result.duration_ms,
+                "response_signature": response_signature.model_dump(),
             }),
             expected_behavior="Cross-owner access must be denied with HTTP 401, 403, or 404 without exposing victim resource data.",
             actual_behavior=(
@@ -209,7 +219,7 @@ class BOLAEngine:
         self.db.add(evidence)
         self.db.flush()
 
-        # Generate Finding if BOLA is CONFIRMED
+        # Generate or Reuse Finding if BOLA is CONFIRMED
         if result == "CONFIRMED":
             severity = config.get("severity", "HIGH").upper()
             if severity not in ["LOW", "MEDIUM", "HIGH", "CRITICAL"]:
@@ -217,29 +227,51 @@ class BOLAEngine:
 
             victim_name = victim_ident.name if victim_ident else "victim user"
             victim_res_name = victim_res.name if victim_res else "resource"
+            attacker_role = attacker.role if attacker else None
 
-            finding = Finding(
-                project_id=security_test.project_id,
-                security_test_id=security_test.id,
-                execution_id=execution.id,
-                type="BOLA",
-                severity=severity,
-                confidence="HIGH",
-                status="OPEN",
-                title="Broken Object Level Authorization",
-                description=(
-                    f"The endpoint '{endpoint.method} {endpoint.path}' allows authenticated identity '{attacker.name}' "
-                    f"to access private {victim_res_name} instance '{victim_instance_id}' belonging to '{victim_name}'. "
-                    f"The server failed to enforce object-level authorization on the requested resource."
-                ),
-                remediation=(
-                    "Enforce server-side object-level authorization and verify that the authenticated principal "
-                    "is explicitly permitted to access the requested resource before returning it."
-                ),
-            )
-            self.db.add(finding)
-            self.db.flush()
-            evidence.finding_id = finding.id
+            # Duplicate Prevention: Look for existing matching finding
+            existing_finding = self.db.query(Finding).filter(
+                Finding.project_id == security_test.project_id,
+                Finding.type == "BOLA",
+                Finding.endpoint_id == security_test.endpoint_id,
+                Finding.attacker_identity_id == security_test.attacker_identity_id,
+                Finding.status != "RESOLVED",
+            ).first()
+
+            if existing_finding:
+                existing_finding.execution_id = execution.id
+                existing_finding.confidence = "HIGH"
+                existing_finding.actual_behavior = reason
+                existing_finding.updated_at = datetime.now(timezone.utc)
+                evidence.finding_id = existing_finding.id
+            else:
+                finding = Finding(
+                    project_id=security_test.project_id,
+                    security_test_id=security_test.id,
+                    execution_id=execution.id,
+                    endpoint_id=security_test.endpoint_id,
+                    attacker_identity_id=security_test.attacker_identity_id,
+                    attacker_role_id=attacker_role.id if attacker_role else None,
+                    type="BOLA",
+                    severity=severity,
+                    confidence="HIGH",
+                    status="OPEN",
+                    title="Broken Object Level Authorization",
+                    description=(
+                        f"The endpoint '{endpoint.method} {endpoint.path}' allows authenticated identity '{attacker.name}' "
+                        f"to access private {victim_res_name} instance '{victim_instance_id}' belonging to '{victim_name}'. "
+                        f"The server failed to enforce object-level authorization on the requested resource."
+                    ),
+                    expected_authorization="DENY",
+                    actual_behavior=reason,
+                    remediation=(
+                        "Enforce server-side object-level authorization and verify that the authenticated principal "
+                        "is explicitly permitted to access the requested resource before returning it."
+                    ),
+                )
+                self.db.add(finding)
+                self.db.flush()
+                evidence.finding_id = finding.id
 
         # Update test status
         security_test.status = "completed"
@@ -253,6 +285,7 @@ class BOLAEngine:
         test_result: ExecutionResult,
         victim_instance_id: str,
         baseline_result: Optional[ExecutionResult],
+        response_signature: Optional[ResponseSignature] = None,
     ) -> Tuple[str, str, Optional[str]]:
         """
         Classifies the BOLA test into PASS, CONFIRMED, INCONCLUSIVE, or ERROR.
