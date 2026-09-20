@@ -42,14 +42,18 @@ export function CardContent({ className, children }: CardContentProps) {
 export interface CardProps {
   className?: string;
   children: React.ReactNode;
+  onClick?: () => void;
 }
 
-export function Card({ className, children }: CardProps) {
+export function Card({ className, children, onClick }: CardProps) {
   return (
-    <div className={cn(
-      "rounded-lg border border-border bg-card p-6 shadow-sm",
-      className,
-    )}>
+    <div
+      onClick={onClick}
+      className={cn(
+        "rounded-lg border border-border bg-card p-6 shadow-sm",
+        className,
+      )}
+    >
       {children}
     </div>
   );

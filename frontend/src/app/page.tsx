@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
+import Link from "next/link";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 
@@ -46,16 +47,16 @@ export default function DashboardPage() {
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Security Dashboard</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            API Authorization & Access Control Modeling Engine
+            API Authorization & Controlled BOLA Security Testing Platform
           </p>
         </div>
         <div className="flex gap-2">
-          <a href="/projects">
-            <Button variant="primary">Manage Projects</Button>
-          </a>
-          <a href="/auth-model">
-            <Button variant="secondary">View Auth Model</Button>
-          </a>
+          <Link href="/security-tests">
+            <Button variant="default">Run BOLA Tests</Button>
+          </Link>
+          <Link href="/findings">
+            <Button variant="secondary">View Findings</Button>
+          </Link>
         </div>
       </div>
 
@@ -89,82 +90,96 @@ export default function DashboardPage() {
             <Card>
               <CardHeader>
                 <CardTitle className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                  Active Environments
+                  Authorized Targets
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="text-3xl font-bold">
-                  {new Set(projects.map((p) => p.environment)).size}
+                <div className="text-3xl font-bold text-emerald-600 dark:text-emerald-400">
+                  {projects.filter((p) => p.authorization_status.toLowerCase() === "authorized").length}
                 </div>
-                <p className="text-xs text-muted-foreground mt-1">Staging, Production & Dev</p>
+                <p className="text-xs text-muted-foreground mt-1">Ready for security probes</p>
               </CardContent>
             </Card>
 
             <Card>
               <CardHeader>
                 <CardTitle className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                  Authorization Modeling
+                  BOLA Engine
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="text-3xl font-bold text-green-600 dark:text-green-400">Ready</div>
-                <p className="text-xs text-muted-foreground mt-1">Stage 2 Engine Active</p>
+                <div className="text-3xl font-bold text-blue-600 dark:text-blue-400">Active</div>
+                <p className="text-xs text-muted-foreground mt-1">Stage 3 Controlled Engine</p>
               </CardContent>
             </Card>
 
             <Card>
               <CardHeader>
                 <CardTitle className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                  Security Status
+                  Secret Protection
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="text-3xl font-bold text-blue-600 dark:text-blue-400">Baseline</div>
-                <p className="text-xs text-muted-foreground mt-1">Tokens masked & protected</p>
+                <div className="text-3xl font-bold text-purple-600 dark:text-purple-400">Strict</div>
+                <p className="text-xs text-muted-foreground mt-1">Masked headers & transcripts</p>
               </CardContent>
             </Card>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
             <Card className="hover:border-primary/50 transition-colors">
               <CardHeader>
-                <CardTitle className="text-base font-semibold">Identities</CardTitle>
+                <CardTitle className="text-base font-semibold">Security Tests</CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
                 <p className="text-xs text-muted-foreground">
-                  Model test users, clients, administrators, and anonymous actors with masked credentials.
+                  Execute controlled Broken Object Level Authorization (BOLA) probes with baseline comparisons.
                 </p>
-                <a href="/identities" className="inline-block">
-                  <Button variant="secondary" size="sm">Manage Identities →</Button>
-                </a>
+                <Link href="/security-tests" className="inline-block">
+                  <Button variant="secondary" size="sm">Configure Tests →</Button>
+                </Link>
               </CardContent>
             </Card>
 
             <Card className="hover:border-primary/50 transition-colors">
               <CardHeader>
-                <CardTitle className="text-base font-semibold">Roles</CardTitle>
+                <CardTitle className="text-base font-semibold">Findings & Evidence</CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
                 <p className="text-xs text-muted-foreground">
-                  Define Anonymous, User, Admin, and custom access roles; assign memberships to identities.
+                  Review confirmed authorization vulnerabilities with redacted transcripts and replay action.
                 </p>
-                <a href="/roles" className="inline-block">
-                  <Button variant="secondary" size="sm">Manage Roles →</Button>
-                </a>
+                <Link href="/findings" className="inline-block">
+                  <Button variant="secondary" size="sm">Inspect Findings →</Button>
+                </Link>
               </CardContent>
             </Card>
 
             <Card className="hover:border-primary/50 transition-colors">
               <CardHeader>
-                <CardTitle className="text-base font-semibold">Resources & Endpoints</CardTitle>
+                <CardTitle className="text-base font-semibold">Auth Model</CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
                 <p className="text-xs text-muted-foreground">
-                  Model resources like User, Order, Payment; map API endpoints and establish ownership.
+                  Inspect the structural Identity → Role → Resource and endpoint authorization topology.
                 </p>
-                <a href="/resources" className="inline-block">
-                  <Button variant="secondary" size="sm">Manage Resources →</Button>
-                </a>
+                <Link href="/auth-model" className="inline-block">
+                  <Button variant="secondary" size="sm">View Hierarchy →</Button>
+                </Link>
+              </CardContent>
+            </Card>
+
+            <Card className="hover:border-primary/50 transition-colors">
+              <CardHeader>
+                <CardTitle className="text-base font-semibold">Identities & Roles</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <p className="text-xs text-muted-foreground">
+                  Manage principals, credential rotation, and access roles for security evaluation.
+                </p>
+                <Link href="/identities" className="inline-block">
+                  <Button variant="secondary" size="sm">Manage Users →</Button>
+                </Link>
               </CardContent>
             </Card>
           </div>
@@ -172,14 +187,14 @@ export default function DashboardPage() {
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
               <CardTitle className="text-lg">Recent Projects</CardTitle>
-              <a href="/projects">
+              <Link href="/projects">
                 <Button variant="default" size="sm">View All</Button>
-              </a>
+              </Link>
             </CardHeader>
             <CardContent>
               {projects.length === 0 ? (
                 <div className="py-8 text-center text-muted-foreground text-sm">
-                  No projects created yet. Start by creating a project to model API authorization.
+                  No projects created yet. Start by creating an authorized project to test API authorization.
                 </div>
               ) : (
                 <div className="divide-y divide-border">
@@ -190,11 +205,20 @@ export default function DashboardPage() {
                         <span className="ml-2 text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground uppercase font-mono">
                           {p.environment}
                         </span>
+                        <span
+                          className={`ml-2 text-xs px-2 py-0.5 rounded-full font-mono ${
+                            p.authorization_status.toLowerCase() === "authorized"
+                              ? "bg-emerald-500/20 text-emerald-700 dark:text-emerald-300"
+                              : "bg-amber-500/20 text-amber-700 dark:text-amber-300"
+                          }`}
+                        >
+                          {p.authorization_status}
+                        </span>
                       </div>
                       <div className="flex gap-2">
-                        <a href={`/auth-model?project_id=${p.id}`}>
-                          <Button variant="secondary" size="sm">Auth Model</Button>
-                        </a>
+                        <Link href={`/security-tests`}>
+                          <Button variant="secondary" size="sm">Test BOLA</Button>
+                        </Link>
                       </div>
                     </div>
                   ))}
