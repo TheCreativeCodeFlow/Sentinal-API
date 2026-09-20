@@ -78,12 +78,12 @@ class AsyncSecurityHttpClient:
                 timeout=self.timeout,
                 follow_redirects=self.follow_redirects,
                 transport=transport,
+                cookies=req_cookies,
             ) as client:
                 resp = await client.request(
                     method=upper_method,
                     url=url,
                     headers=req_headers,
-                    cookies=req_cookies,
                     params=params,
                 )
                 duration_ms = int((time.perf_counter() - start_time) * 1000)
