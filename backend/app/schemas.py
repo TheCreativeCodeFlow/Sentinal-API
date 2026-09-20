@@ -295,3 +295,105 @@ class AuthorizationModelView(BaseModel):
     total_identities: int = 0
     total_roles: int = 0
     total_resources: int = 0
+
+
+# ==============================================================================
+# STAGE 3: Security Testing Engine Schemas (BOLA)
+# ==============================================================================
+
+class SecurityTestCreate(BaseModel):
+    endpoint_id: int
+    test_type: str = Field("BOLA", min_length=1, max_length=50)
+    attacker_identity_id: str
+    victim_identity_id: Optional[str] = None
+    victim_resource_id: Optional[str] = None
+    victim_resource_instance_id: Optional[str] = Field(None, max_length=255)
+    attacker_resource_instance_id: Optional[str] = Field(None, max_length=255)
+    configuration: Optional[Dict[str, Any]] = None
+
+
+class SecurityTestInDB(BaseModel):
+    id: str
+    project_id: int
+    endpoint_id: int
+    endpoint_method: Optional[str] = None
+    endpoint_path: Optional[str] = None
+    test_type: str
+    attacker_identity_id: str
+    attacker_identity_name: Optional[str] = None
+    victim_identity_id: Optional[str] = None
+    victim_identity_name: Optional[str] = None
+    victim_resource_id: Optional[str] = None
+    victim_resource_name: Optional[str] = None
+    victim_resource_instance_id: Optional[str] = None
+    attacker_resource_instance_id: Optional[str] = None
+    status: str
+    configuration: Optional[Dict[str, Any]] = None
+    created_at: datetime
+    updated_at: datetime
+    latest_result: Optional[str] = None
+    executions_count: Optional[int] = 0
+    findings_count: Optional[int] = 0
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class EvidenceInDB(BaseModel):
+    id: str
+    execution_id: str
+    finding_id: Optional[str] = None
+    request_metadata: Optional[Dict[str, Any]] = None
+    response_metadata: Optional[Dict[str, Any]] = None
+    expected_behavior: str
+    actual_behavior: str
+    redacted_request: Optional[str] = None
+    redacted_response: Optional[str] = None
+    reproducibility_status: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TestExecutionInDB(BaseModel):
+    id: str
+    security_test_id: str
+    status: str
+    result: Optional[str] = None
+    result_reason: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    http_status: Optional[int] = None
+    duration_ms: Optional[int] = None
+    error_category: Optional[str] = None
+    created_at: datetime
+    evidence: Optional[EvidenceInDB] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class FindingInDB(BaseModel):
+    id: str
+    project_id: int
+    security_test_id: str
+    execution_id: str
+    type: str
+    severity: str
+    confidence: str
+    status: str
+    title: str
+    description: str
+    remediation: str
+    created_at: datetime
+    endpoint_method: Optional[str] = None
+    endpoint_path: Optional[str] = None
+    attacker_identity_name: Optional[str] = None
+    victim_resource_name: Optional[str] = None
+    victim_resource_instance_id: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class FindingDetail(FindingInDB):
+    evidence: Optional[EvidenceInDB] = None
+    expected_behavior: Optional[str] = None
+    actual_behavior: Optional[str] = None

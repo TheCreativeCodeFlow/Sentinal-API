@@ -38,6 +38,8 @@ class Project(Base):
     roles = relationship("Role", back_populates="project", cascade="all, delete-orphan")
     identities = relationship("Identity", back_populates="project", cascade="all, delete-orphan")
     resources = relationship("Resource", back_populates="project", cascade="all, delete-orphan")
+    security_tests = relationship("SecurityTest", back_populates="project", cascade="all, delete-orphan")
+    findings = relationship("Finding", back_populates="project", cascade="all, delete-orphan")
 
 
 class API(Base):
@@ -211,3 +213,108 @@ class AuthScheme(Base):
     __table_args__ = (
         Index("ix_auth_schemes_name", "name"),
     )
+
+
+# ==============================================================================
+# STAGE 3: Controlled Security Testing Engine (BOLA)
+# ==============================================================================
+
+class SecurityTest(Base):
+    __tablename__ = "security_tests"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    endpoint_id = Column(Integer, ForeignKey("endpoints.id", ondelete="CASCADE"), nullable=False, index=True)
+    test_type = Column(String(50), nullable=False, default="BOLA", index=True)
+    attacker_identity_id = Column(String(36), ForeignKey("identities.id", ondelete="CASCADE"), nullable=False, index=True)
+    victim_identity_id = Column(String(36), ForeignKey("identities.id", ondelete="SET NULL"), nullable=True, index=True)
+    victim_resource_id = Column(String(36), ForeignKey("resources.id", ondelete="SET NULL"), nullable=True, index=True)
+    victim_resource_instance_id = Column(String(255), nullable=True)
+    attacker_resource_instance_id = Column(String(255), nullable=True)
+    status = Column(String(50), nullable=False, default="configured", index=True)
+    configuration = Column(Text, nullable=True)  # JSON-encoded test settings
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    project = relationship("Project", back_populates="security_tests")
+    endpoint = relationship("Endpoint")
+    attacker_identity = relationship("Identity", foreign_keys=[attacker_identity_id])
+    victim_identity = relationship("Identity", foreign_keys=[victim_identity_id])
+    victim_resource = relationship("Resource", foreign_keys=[victim_resource_id])
+    executions = relationship("TestExecution", back_populates="security_test", cascade="all, delete-orphan")
+    findings = relationship("Finding", back_populates="security_test", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("ix_security_tests_proj_type", "project_id", "test_type"),
+    )
+
+
+class TestExecution(Base):
+    __tablename__ = "test_executions"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    security_test_id = Column(String(36), ForeignKey("security_tests.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String(50), nullable=False, default="PENDING", index=True)  # PENDING, RUNNING, COMPLETED, FAILED
+    result = Column(String(50), nullable=True, index=True)  # PASS, CONFIRMED, INCONCLUSIVE, ERROR
+    result_reason = Column(Text, nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    http_status = Column(Integer, nullable=True)
+    duration_ms = Column(Integer, nullable=True)
+    error_category = Column(String(100), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    security_test = relationship("SecurityTest", back_populates="executions")
+    evidence = relationship("Evidence", back_populates="execution", uselist=False, cascade="all, delete-orphan")
+    findings = relationship("Finding", back_populates="execution", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("ix_test_executions_test_status", "security_test_id", "status"),
+    )
+
+
+class Finding(Base):
+    __tablename__ = "findings"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    security_test_id = Column(String(36), ForeignKey("security_tests.id", ondelete="CASCADE"), nullable=False, index=True)
+    execution_id = Column(String(36), ForeignKey("test_executions.id", ondelete="CASCADE"), nullable=False, index=True)
+    type = Column(String(50), nullable=False, default="BOLA", index=True)
+    severity = Column(String(50), nullable=False, default="HIGH", index=True)  # LOW, MEDIUM, HIGH, CRITICAL
+    confidence = Column(String(50), nullable=False, default="HIGH")  # LOW, MEDIUM, HIGH
+    status = Column(String(50), nullable=False, default="OPEN", index=True)  # OPEN, RESOLVED, FALSE_POSITIVE
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=False)
+    remediation = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    project = relationship("Project", back_populates="findings")
+    security_test = relationship("SecurityTest", back_populates="findings")
+    execution = relationship("TestExecution", back_populates="findings")
+    evidence = relationship("Evidence", back_populates="finding", uselist=False)
+
+    __table_args__ = (
+        Index("ix_findings_project_severity", "project_id", "severity"),
+    )
+
+
+class Evidence(Base):
+    __tablename__ = "evidence"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    execution_id = Column(String(36), ForeignKey("test_executions.id", ondelete="CASCADE"), nullable=False, index=True)
+    finding_id = Column(String(36), ForeignKey("findings.id", ondelete="SET NULL"), nullable=True, index=True)
+    request_metadata = Column(Text, nullable=True)  # JSON-encoded metadata
+    response_metadata = Column(Text, nullable=True)  # JSON-encoded metadata
+    expected_behavior = Column(Text, nullable=False)
+    actual_behavior = Column(Text, nullable=False)
+    redacted_request = Column(Text, nullable=True)
+    redacted_response = Column(Text, nullable=True)
+    reproducibility_status = Column(String(50), nullable=False, default="REPRODUCIBLE")
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    execution = relationship("TestExecution", back_populates="evidence")
+    finding = relationship("Finding", back_populates="evidence")
