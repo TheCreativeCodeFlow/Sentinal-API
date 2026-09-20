@@ -309,6 +309,7 @@ class SecurityTestCreate(BaseModel):
     victim_resource_id: Optional[str] = None
     victim_resource_instance_id: Optional[str] = Field(None, max_length=255)
     attacker_resource_instance_id: Optional[str] = Field(None, max_length=255)
+    expected_access: Optional[str] = Field("DENY", max_length=20)
     configuration: Optional[Dict[str, Any]] = None
 
 
@@ -321,12 +322,14 @@ class SecurityTestInDB(BaseModel):
     test_type: str
     attacker_identity_id: str
     attacker_identity_name: Optional[str] = None
+    attacker_role_name: Optional[str] = None
     victim_identity_id: Optional[str] = None
     victim_identity_name: Optional[str] = None
     victim_resource_id: Optional[str] = None
     victim_resource_name: Optional[str] = None
     victim_resource_instance_id: Optional[str] = None
     attacker_resource_instance_id: Optional[str] = None
+    expected_access: Optional[str] = "DENY"
     status: str
     configuration: Optional[Dict[str, Any]] = None
     created_at: datetime
@@ -376,6 +379,9 @@ class FindingInDB(BaseModel):
     project_id: int
     security_test_id: str
     execution_id: str
+    endpoint_id: Optional[int] = None
+    attacker_identity_id: Optional[str] = None
+    attacker_role_id: Optional[str] = None
     type: str
     severity: str
     confidence: str
@@ -383,10 +389,14 @@ class FindingInDB(BaseModel):
     title: str
     description: str
     remediation: str
+    expected_authorization: Optional[str] = None
+    actual_behavior: Optional[str] = None
     created_at: datetime
+    updated_at: Optional[datetime] = None
     endpoint_method: Optional[str] = None
     endpoint_path: Optional[str] = None
     attacker_identity_name: Optional[str] = None
+    attacker_role_name: Optional[str] = None
     victim_resource_name: Optional[str] = None
     victim_resource_instance_id: Optional[str] = None
 
@@ -396,4 +406,111 @@ class FindingInDB(BaseModel):
 class FindingDetail(FindingInDB):
     evidence: Optional[EvidenceInDB] = None
     expected_behavior: Optional[str] = None
-    actual_behavior: Optional[str] = None
+
+
+# ==============================================================================
+# STAGE 4: Authorization Boundary & Matrix Schemas
+# ==============================================================================
+
+class EndpointAuthorizationPolicyBase(BaseModel):
+    authentication_required: bool = True
+    notes: Optional[str] = Field(None, max_length=1000)
+
+
+class EndpointAuthorizationPolicyCreate(EndpointAuthorizationPolicyBase):
+    allowed_role_ids: Optional[List[str]] = []
+    denied_role_ids: Optional[List[str]] = []
+
+
+class EndpointAuthorizationPolicyUpdate(BaseModel):
+    authentication_required: Optional[bool] = None
+    notes: Optional[str] = Field(None, max_length=1000)
+    allowed_role_ids: Optional[List[str]] = None
+    denied_role_ids: Optional[List[str]] = None
+
+
+class EndpointAuthorizationPolicyInDB(EndpointAuthorizationPolicyBase):
+    id: str
+    project_id: int
+    endpoint_id: int
+    endpoint_method: Optional[str] = None
+    endpoint_path: Optional[str] = None
+    allowed_roles: List[RoleBase] = []
+    denied_roles: List[RoleBase] = []
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AuthorizationMatrixRuleCreate(BaseModel):
+    endpoint_id: int
+    role_id: Optional[str] = None
+    identity_id: Optional[str] = None
+    http_method: str = Field("GET", min_length=1, max_length=10)
+    expected_access: str = Field("UNKNOWN", description="ALLOW, DENY, UNKNOWN")
+
+
+class AuthorizationMatrixRuleUpdate(BaseModel):
+    expected_access: str = Field(..., description="ALLOW, DENY, UNKNOWN")
+
+
+class AuthorizationMatrixRuleInDB(BaseModel):
+    id: str
+    project_id: int
+    endpoint_id: int
+    role_id: Optional[str] = None
+    role_name: Optional[str] = None
+    identity_id: Optional[str] = None
+    identity_name: Optional[str] = None
+    http_method: str
+    expected_access: str
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AuthorizationMatrixCell(BaseModel):
+    endpoint_id: int
+    role_id: Optional[str] = None
+    role_name: str
+    http_method: str
+    expected_access: str = "UNKNOWN"  # ALLOW, DENY, UNKNOWN
+    test_status: str = "NOT TESTED"  # NOT TESTED, PASS, CONFIRMED, INCONCLUSIVE
+    security_test_id: Optional[str] = None
+    latest_execution_id: Optional[str] = None
+    latest_result: Optional[str] = None
+    finding_id: Optional[str] = None
+
+
+class AuthorizationMatrixEndpointRow(BaseModel):
+    endpoint_id: int
+    method: str
+    path: str
+    summary: Optional[str] = None
+    authentication_required: bool = True
+    policy_notes: Optional[str] = None
+    cells: Dict[str, AuthorizationMatrixCell] = {}  # keyed by role_id (or "anonymous")
+
+
+class AuthorizationMatrixView(BaseModel):
+    project_id: int
+    project_name: str
+    roles: List[RoleInDB] = []
+    endpoints: List[AuthorizationMatrixEndpointRow] = []
+    total_cells: int = 0
+    confirmed_count: int = 0
+    pass_count: int = 0
+    untested_count: int = 0
+
+
+class BFLATestGenerateRequest(BaseModel):
+    endpoint_ids: Optional[List[int]] = None  # None means all safe endpoints in project
+    target_all_safe_endpoints: bool = True
+
+
+class BFLATestGenerateResult(BaseModel):
+    generated_count: int
+    skipped_count: int
+    tests: List[SecurityTestInDB] = []

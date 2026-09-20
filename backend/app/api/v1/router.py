@@ -261,14 +261,18 @@ def format_execution_response(execution: TestExecution) -> TestExecutionInDB:
 
 
 def format_finding_response(finding: Finding, db: Session) -> FindingInDB:
-    endpoint = finding.security_test.endpoint if finding.security_test else None
-    attacker = finding.security_test.attacker_identity if finding.security_test else None
+    endpoint = finding.endpoint or (finding.security_test.endpoint if finding.security_test else None)
+    attacker = finding.attacker_identity or (finding.security_test.attacker_identity if finding.security_test else None)
+    attacker_role = finding.attacker_role or (attacker.role if attacker else None)
     victim_res = finding.security_test.victim_resource if finding.security_test else None
     return FindingInDB(
         id=finding.id,
         project_id=finding.project_id,
         security_test_id=finding.security_test_id,
         execution_id=finding.execution_id,
+        endpoint_id=finding.endpoint_id or (endpoint.id if endpoint else None),
+        attacker_identity_id=finding.attacker_identity_id or (attacker.id if attacker else None),
+        attacker_role_id=finding.attacker_role_id or (attacker_role.id if attacker_role else None),
         type=finding.type,
         severity=finding.severity,
         confidence=finding.confidence,
@@ -276,10 +280,14 @@ def format_finding_response(finding: Finding, db: Session) -> FindingInDB:
         title=finding.title,
         description=finding.description,
         remediation=finding.remediation,
+        expected_authorization=finding.expected_authorization,
+        actual_behavior=finding.actual_behavior,
         created_at=finding.created_at,
+        updated_at=finding.updated_at,
         endpoint_method=endpoint.method if endpoint else None,
         endpoint_path=endpoint.path if endpoint else None,
         attacker_identity_name=attacker.name if attacker else None,
+        attacker_role_name=attacker_role.name if attacker_role else None,
         victim_resource_name=victim_res.name if victim_res else None,
         victim_resource_instance_id=finding.security_test.victim_resource_instance_id if finding.security_test else None,
     )
@@ -291,12 +299,14 @@ def format_finding_detail(finding: Finding, db: Session) -> FindingDetail:
     if not ev and finding.execution:
         ev = finding.execution.evidence
     ev_in_db = format_evidence_response(ev)
-    return FindingDetail(
-        **base.model_dump(),
-        evidence=ev_in_db,
-        expected_behavior=ev.expected_behavior if ev else None,
-        actual_behavior=ev.actual_behavior if ev else None,
-    )
+
+    data = base.model_dump()
+    if ev:
+        if not data.get("actual_behavior"):
+            data["actual_behavior"] = ev.actual_behavior
+        data["expected_behavior"] = ev.expected_behavior
+    data["evidence"] = ev_in_db
+    return FindingDetail(**data)
 
 
 def format_identity_response(identity: Identity) -> IdentityInDB:

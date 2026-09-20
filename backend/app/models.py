@@ -8,6 +8,7 @@ from sqlalchemy import (
     Boolean,
     ForeignKey,
     Index,
+    Table,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -40,6 +41,8 @@ class Project(Base):
     resources = relationship("Resource", back_populates="project", cascade="all, delete-orphan")
     security_tests = relationship("SecurityTest", back_populates="project", cascade="all, delete-orphan")
     findings = relationship("Finding", back_populates="project", cascade="all, delete-orphan")
+    endpoint_policies = relationship("EndpointAuthorizationPolicy", back_populates="project", cascade="all, delete-orphan")
+    matrix_rules = relationship("AuthorizationMatrixRule", back_populates="project", cascade="all, delete-orphan")
 
 
 class API(Base):
@@ -79,6 +82,8 @@ class Endpoint(Base):
 
     api = relationship("API", back_populates="endpoints")
     resource = relationship("Resource", back_populates="endpoints")
+    policy = relationship("EndpointAuthorizationPolicy", back_populates="endpoint", uselist=False, cascade="all, delete-orphan")
+    matrix_rules = relationship("AuthorizationMatrixRule", back_populates="endpoint", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("ix_endpoints_api_id", "api_id"),
@@ -231,6 +236,7 @@ class SecurityTest(Base):
     victim_resource_id = Column(String(36), ForeignKey("resources.id", ondelete="SET NULL"), nullable=True, index=True)
     victim_resource_instance_id = Column(String(255), nullable=True)
     attacker_resource_instance_id = Column(String(255), nullable=True)
+    expected_access = Column(String(20), nullable=True, default="DENY")
     status = Column(String(50), nullable=False, default="configured", index=True)
     configuration = Column(Text, nullable=True)  # JSON-encoded test settings
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -282,22 +288,34 @@ class Finding(Base):
     project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
     security_test_id = Column(String(36), ForeignKey("security_tests.id", ondelete="CASCADE"), nullable=False, index=True)
     execution_id = Column(String(36), ForeignKey("test_executions.id", ondelete="CASCADE"), nullable=False, index=True)
-    type = Column(String(50), nullable=False, default="BOLA", index=True)
+    endpoint_id = Column(Integer, ForeignKey("endpoints.id", ondelete="SET NULL"), nullable=True, index=True)
+    attacker_identity_id = Column(String(36), ForeignKey("identities.id", ondelete="SET NULL"), nullable=True, index=True)
+    attacker_role_id = Column(String(36), ForeignKey("roles.id", ondelete="SET NULL"), nullable=True, index=True)
+    type = Column(String(50), nullable=False, default="BOLA", index=True)  # BOLA, BFLA
     severity = Column(String(50), nullable=False, default="HIGH", index=True)  # LOW, MEDIUM, HIGH, CRITICAL
     confidence = Column(String(50), nullable=False, default="HIGH")  # LOW, MEDIUM, HIGH
     status = Column(String(50), nullable=False, default="OPEN", index=True)  # OPEN, RESOLVED, FALSE_POSITIVE
     title = Column(String(255), nullable=False)
     description = Column(Text, nullable=False)
+    expected_authorization = Column(String(50), nullable=True)  # e.g., DENY, ALLOW
+    actual_behavior = Column(Text, nullable=True)
     remediation = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
     project = relationship("Project", back_populates="findings")
     security_test = relationship("SecurityTest", back_populates="findings")
     execution = relationship("TestExecution", back_populates="findings")
     evidence = relationship("Evidence", back_populates="finding", uselist=False)
+    endpoint = relationship("Endpoint")
+    attacker_identity = relationship("Identity", foreign_keys=[attacker_identity_id])
+    attacker_role = relationship("Role", foreign_keys=[attacker_role_id])
 
     __table_args__ = (
         Index("ix_findings_project_severity", "project_id", "severity"),
+        Index("ix_findings_project_type", "project_id", "type"),
     )
 
 
@@ -318,3 +336,74 @@ class Evidence(Base):
 
     execution = relationship("TestExecution", back_populates="evidence")
     finding = relationship("Finding", back_populates="evidence")
+
+
+# ==============================================================================
+# STAGE 4: Authorization Boundary Engine (BFLA & Authorization Matrix)
+# ==============================================================================
+
+endpoint_policy_allowed_roles = Table(
+    "endpoint_policy_allowed_roles",
+    Base.metadata,
+    Column("policy_id", String(36), ForeignKey("endpoint_authorization_policies.id", ondelete="CASCADE"), primary_key=True),
+    Column("role_id", String(36), ForeignKey("roles.id", ondelete="CASCADE"), primary_key=True),
+)
+
+endpoint_policy_denied_roles = Table(
+    "endpoint_policy_denied_roles",
+    Base.metadata,
+    Column("policy_id", String(36), ForeignKey("endpoint_authorization_policies.id", ondelete="CASCADE"), primary_key=True),
+    Column("role_id", String(36), ForeignKey("roles.id", ondelete="CASCADE"), primary_key=True),
+)
+
+
+class EndpointAuthorizationPolicy(Base):
+    __tablename__ = "endpoint_authorization_policies"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    endpoint_id = Column(Integer, ForeignKey("endpoints.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    authentication_required = Column(Boolean, default=True, nullable=False)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    project = relationship("Project", back_populates="endpoint_policies")
+    endpoint = relationship("Endpoint", back_populates="policy")
+    allowed_roles = relationship(
+        "Role",
+        secondary=endpoint_policy_allowed_roles,
+        backref="allowed_policies",
+    )
+    denied_roles = relationship(
+        "Role",
+        secondary=endpoint_policy_denied_roles,
+        backref="denied_policies",
+    )
+
+
+class AuthorizationMatrixRule(Base):
+    __tablename__ = "authorization_matrix_rules"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    endpoint_id = Column(Integer, ForeignKey("endpoints.id", ondelete="CASCADE"), nullable=False, index=True)
+    role_id = Column(String(36), ForeignKey("roles.id", ondelete="CASCADE"), nullable=True, index=True)
+    identity_id = Column(String(36), ForeignKey("identities.id", ondelete="CASCADE"), nullable=True, index=True)
+    http_method = Column(String(10), nullable=False, default="GET")
+    expected_access = Column(String(20), nullable=False, default="UNKNOWN")  # ALLOW, DENY, UNKNOWN
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    project = relationship("Project", back_populates="matrix_rules")
+    endpoint = relationship("Endpoint", back_populates="matrix_rules")
+    role = relationship("Role")
+    identity = relationship("Identity")
+
+    __table_args__ = (
+        Index("ix_matrix_endpoint_role_method", "endpoint_id", "role_id", "http_method"),
+    )
