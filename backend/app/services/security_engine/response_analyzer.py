@@ -19,6 +19,23 @@ SENSITIVE_KEY_PATTERNS = [
     re.compile(r"private[_-]?key", re.IGNORECASE),
 ]
 
+SENSITIVE_HEURISTICS_RULES: List[Tuple[re.Pattern, str, str]] = [
+    # (pattern, suggested_sensitivity: SECRET, SENSITIVE, INTERNAL, heuristic_name)
+    (re.compile(r"^password(_hash)?$", re.IGNORECASE), "SECRET", "password"),
+    (re.compile(r"(access|refresh)[_-]?token", re.IGNORECASE), "SECRET", "access_or_refresh_token"),
+    (re.compile(r"api[_-]?key", re.IGNORECASE), "SECRET", "api_key"),
+    (re.compile(r"(private[_-]?key|secret)", re.IGNORECASE), "SECRET", "secret_or_private_key"),
+    (re.compile(r"(auth|bearer)[_-]?token", re.IGNORECASE), "SECRET", "auth_token"),
+    (re.compile(r"^token$", re.IGNORECASE), "SECRET", "token"),
+    (re.compile(r"(credit[_-]?card|card[_-]?number|cvv)", re.IGNORECASE), "SENSITIVE", "credit_card"),
+    (re.compile(r"^ssn$", re.IGNORECASE), "SENSITIVE", "ssn"),
+    (re.compile(r"(salary|compensation|wage)", re.IGNORECASE), "SENSITIVE", "salary"),
+    (re.compile(r"internal[_-]?notes?", re.IGNORECASE), "INTERNAL", "internal_notes"),
+    (re.compile(r"^(role|roles)$", re.IGNORECASE), "INTERNAL", "role"),
+    (re.compile(r"(is[_-]?admin|is[_-]?superuser|permissions?)", re.IGNORECASE), "INTERNAL", "admin_or_permission"),
+]
+
+
 DENIAL_BODY_PATTERNS = [
     re.compile(r"access\s*denied", re.IGNORECASE),
     re.compile(r"unauthorized", re.IGNORECASE),
@@ -52,6 +69,8 @@ class ResponseSignature(BaseModel):
     normalized_structure: Optional[Any] = None
     detected_identifiers: List[str] = Field(default_factory=list)
     sensitive_fields_detected: List[str] = Field(default_factory=list)
+    all_property_paths: List[str] = Field(default_factory=list)
+    candidate_sensitive_properties: List[Dict[str, Any]] = Field(default_factory=list)
     denial_indicator: Optional[str] = None
 
 
@@ -159,6 +178,100 @@ class ResponseAnalyzer:
         return deduped[:15]
 
     @classmethod
+    def extract_property_paths(
+        cls,
+        data: Any,
+        prefix: str = "",
+        current_depth: int = 0,
+        max_depth: int = 6,
+    ) -> List[str]:
+        """
+        Recursively extracts all property paths from parsed JSON data (primitive fields,
+        nested objects, and arrays). Normalizes property paths consistently (e.g. user.profile.email,
+        user.role, user.internal_notes, items[].id).
+        """
+        paths: List[str] = []
+        if current_depth >= max_depth:
+            return paths
+
+        if isinstance(data, dict):
+            for k, v in data.items():
+                current_path = f"{prefix}.{k}" if prefix else k
+                paths.append(current_path)
+                if isinstance(v, (dict, list)):
+                    paths.extend(
+                        cls.extract_property_paths(
+                            v, prefix=current_path, current_depth=current_depth + 1, max_depth=max_depth
+                        )
+                    )
+        elif isinstance(data, list):
+            for item in data[:3]:
+                if isinstance(item, dict):
+                    for k, v in item.items():
+                        base_path = f"{prefix}.{k}" if prefix else k
+                        array_path = f"{prefix}[].{k}" if prefix else f"[].{k}"
+                        paths.append(base_path)
+                        paths.append(array_path)
+                        if isinstance(v, (dict, list)):
+                            paths.extend(
+                                cls.extract_property_paths(
+                                    v, prefix=base_path, current_depth=current_depth + 1, max_depth=max_depth
+                                )
+                            )
+                            paths.extend(
+                                cls.extract_property_paths(
+                                    v, prefix=array_path, current_depth=current_depth + 1, max_depth=max_depth
+                                )
+                            )
+
+        # Deduplicate while preserving order
+        seen = set()
+        deduped = []
+        for p in paths:
+            if p not in seen:
+                seen.add(p)
+                deduped.append(p)
+        return deduped
+
+    @classmethod
+    def classify_property_heuristic(
+        cls,
+        prop_path: str,
+        sample_value: Any = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Applies configurable sensitive property heuristics to a property path.
+        Returns candidate classification dict with suggested_sensitivity and matched_heuristic,
+        or None if no sensitive heuristic matches.
+        """
+        leaf_name = prop_path.split(".")[-1].replace("[]", "")
+        for pat, suggested_sens, name in SENSITIVE_HEURISTICS_RULES:
+            if pat.search(leaf_name) or pat.search(prop_path):
+                return {
+                    "path": prop_path,
+                    "suggested_sensitivity": suggested_sens,
+                    "matched_heuristic": name,
+                    "sample_value": str(sample_value)[:100] if sample_value is not None else None,
+                }
+        return None
+
+    @classmethod
+    def discover_candidate_sensitive_properties(cls, data: Any) -> List[Dict[str, Any]]:
+        """
+        Scans parsed JSON for properties matching candidate sensitive heuristics.
+        Returns a deduplicated list of candidate property classifications.
+        """
+        paths = cls.extract_property_paths(data)
+        candidates = []
+        seen = set()
+        for p in paths:
+            res = cls.classify_property_heuristic(p)
+            if res and p not in seen:
+                seen.add(p)
+                candidates.append(res)
+        return candidates
+
+    @classmethod
     def analyze(
         cls,
         status_code: int,
@@ -178,6 +291,8 @@ class ResponseAnalyzer:
         normalized_structure: Optional[Any] = None
         detected_identifiers: List[str] = []
         sensitive_fields: List[str] = []
+        all_property_paths: List[str] = []
+        candidate_sensitive: List[Dict[str, Any]] = []
 
         if not is_empty:
             try:
@@ -186,6 +301,8 @@ class ResponseAnalyzer:
                 normalized_structure = cls.normalize_structure(parsed_json)
                 detected_identifiers = cls.extract_identifiers(parsed_json)
                 sensitive_fields = cls.extract_sensitive_fields(parsed_json)
+                all_property_paths = cls.extract_property_paths(parsed_json)
+                candidate_sensitive = cls.discover_candidate_sensitive_properties(parsed_json)
             except Exception:
                 # Non-JSON body
                 is_json = False
@@ -228,6 +345,8 @@ class ResponseAnalyzer:
             normalized_structure=normalized_structure,
             detected_identifiers=detected_identifiers,
             sensitive_fields_detected=sensitive_fields,
+            all_property_paths=all_property_paths,
+            candidate_sensitive_properties=candidate_sensitive,
             denial_indicator=denial_indicator,
         )
 
@@ -332,3 +451,87 @@ class ResponseAnalyzer:
             f"Expected authorization policy is '{expected_access}'; unable to evaluate pass/confirmed status.",
             None,
         )
+
+    @classmethod
+    def matches_property(cls, candidate_path: str, rule_property_name: str) -> bool:
+        """
+        Determines whether an observed property path matches a configured property rule name.
+        Supports exact match, suffix match, terminal property match, and array normalization.
+        """
+        c = candidate_path.lower().replace("[]", "").strip()
+        r = rule_property_name.lower().replace("[]", "").strip()
+        if c == r:
+            return True
+        if c.endswith("." + r):
+            return True
+        if r.endswith("." + c):
+            return True
+        if c.split(".")[-1] == r.split(".")[-1]:
+            return True
+        return False
+
+    @classmethod
+    def evaluate_property_exposure(
+        cls,
+        signature: ResponseSignature,
+        property_rules: Dict[str, str],
+    ) -> Tuple[str, str, List[str]]:
+        """
+        Evaluates read-side property exposure security outcome:
+        - If protected properties marked DENY are exposed -> CONFIRMED
+        - If protected properties are absent or access was denied -> PASS
+        - If response cannot be reliably analyzed (server error, non-JSON) -> INCONCLUSIVE
+        Returns: (result: PASS | CONFIRMED | INCONCLUSIVE, reason: str, exposed_deny_props: List[str])
+        """
+        if signature.is_server_error:
+            return (
+                "INCONCLUSIVE",
+                f"Target returned server error HTTP {signature.status_code}; property exposure cannot be evaluated.",
+                [],
+            )
+
+        if signature.status_code in (401, 403, 404) or signature.is_auth_failure:
+            return (
+                "PASS",
+                f"Endpoint access was denied ({signature.denial_indicator or f'HTTP {signature.status_code}'}); protected properties were not exposed.",
+                [],
+            )
+
+        if not signature.is_json:
+            return (
+                "INCONCLUSIVE",
+                "Target response was not valid JSON; cannot reliably extract and verify property paths.",
+                [],
+            )
+
+        # Identify all properties marked DENY
+        deny_properties = [prop for prop, acc in property_rules.items() if acc.upper() == "DENY"]
+
+        if not deny_properties:
+            return (
+                "PASS",
+                "No protected properties are configured with DENY policy for this principal.",
+                [],
+            )
+
+        exposed_deny_props: List[str] = []
+        for deny_prop in deny_properties:
+            for observed_path in signature.all_property_paths:
+                if cls.matches_property(observed_path, deny_prop):
+                    if observed_path not in exposed_deny_props:
+                        exposed_deny_props.append(observed_path)
+                    break
+
+        if exposed_deny_props:
+            return (
+                "CONFIRMED",
+                f"Unauthorized property exposure confirmed: {len(exposed_deny_props)} protected propert(ies) marked DENY were present in response: {', '.join(exposed_deny_props)}.",
+                exposed_deny_props,
+            )
+
+        return (
+            "PASS",
+            "All protected properties marked DENY were properly omitted from the response.",
+            [],
+        )
+
