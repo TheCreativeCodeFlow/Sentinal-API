@@ -186,3 +186,83 @@ def get_system_stats_error(
 ):
     """Simulates an internal server error on admin function."""
     raise HTTPException(status_code=500, detail="Administrative service failure")
+
+
+# ==============================================================================
+# STAGE 5: Property-Level Authorization Test Endpoints
+# ==============================================================================
+
+DEMO_USER_PROFILES = {
+    "user_alice_001": {
+        "id": "user_alice_001",
+        "name": "Alice Victim",
+        "email": "alice@example.com",
+        "role": "User",
+        "internal_notes": "VIP Customer with privileged SLA",
+    },
+    "user_bob_002": {
+        "id": "user_bob_002",
+        "name": "Bob Attacker",
+        "email": "bob@example.com",
+        "role": "User",
+        "internal_notes": "Standard trial account flagged for audit",
+    },
+}
+
+
+@demo_target_router.get(
+    "/users/{user_id}",
+    summary="[TEST ONLY] User Profile Property Exposure Endpoint",
+    description="Returns full user object with role and internal_notes. Intended for testing property exposure.",
+)
+def get_user_profile(
+    user_id: str,
+    user: Dict[str, Any] = Depends(get_current_demo_user),
+):
+    """
+    Intentionally exposes all fields (id, name, email, role, internal_notes)
+    regardless of whether the caller's role is allowed to see role or internal_notes.
+    """
+    profile = DEMO_USER_PROFILES.get(user_id)
+    if not profile:
+        profile = {
+            "id": user_id,
+            "name": f"User {user_id}",
+            "email": f"{user_id}@example.com",
+            "role": "User",
+            "internal_notes": f"Confidential internal notes for {user_id}",
+        }
+    return profile
+
+
+@demo_target_router.get(
+    "/filtered-users/{user_id}",
+    summary="[TEST ONLY] Properly Filtered User Profile Endpoint",
+    description="Filters protected properties (role, internal_notes) if caller is not Admin.",
+)
+def get_user_profile_filtered(
+    user_id: str,
+    user: Dict[str, Any] = Depends(get_current_demo_user),
+):
+    """
+    Secure endpoint:
+    Omits 'role' and 'internal_notes' for non-Admin callers.
+    """
+    profile = DEMO_USER_PROFILES.get(user_id)
+    if not profile:
+        profile = {
+            "id": user_id,
+            "name": f"User {user_id}",
+            "email": f"{user_id}@example.com",
+            "role": "User",
+            "internal_notes": f"Confidential internal notes for {user_id}",
+        }
+
+    if user.get("role") != "Admin":
+        return {
+            "id": profile["id"],
+            "name": profile["name"],
+            "email": profile["email"],
+        }
+    return profile
+
