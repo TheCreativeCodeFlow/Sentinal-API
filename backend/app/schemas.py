@@ -395,6 +395,8 @@ class FindingInDB(BaseModel):
     updated_at: Optional[datetime] = None
     endpoint_method: Optional[str] = None
     endpoint_path: Optional[str] = None
+    resource_id: Optional[str] = None
+    exposed_properties: Optional[List[str]] = None
     attacker_identity_name: Optional[str] = None
     attacker_role_name: Optional[str] = None
     victim_resource_name: Optional[str] = None
@@ -514,3 +516,100 @@ class BFLATestGenerateResult(BaseModel):
     generated_count: int
     skipped_count: int
     tests: List[SecurityTestInDB] = []
+
+
+# ==============================================================================
+# STAGE 5: Property-Level Security Schemas
+# ==============================================================================
+
+class PropertyAuthorizationRuleBase(BaseModel):
+    role_id: str
+    access: str = Field("UNKNOWN", max_length=20)  # ALLOW, DENY, UNKNOWN
+
+
+class PropertyAuthorizationRuleCreate(PropertyAuthorizationRuleBase):
+    pass
+
+
+class PropertyAuthorizationRuleInDB(PropertyAuthorizationRuleBase):
+    id: str
+    resource_property_id: str
+    role_name: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ResourcePropertyBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    data_type: str = Field("string", min_length=1, max_length=50)
+    sensitivity: str = Field("INTERNAL", min_length=1, max_length=50)  # PUBLIC, INTERNAL, SENSITIVE, SECRET
+    description: Optional[str] = Field(None, max_length=1000)
+
+
+class ResourcePropertyCreate(ResourcePropertyBase):
+    initial_rules: Optional[Dict[str, str]] = None  # role_id -> access (ALLOW, DENY, UNKNOWN)
+
+
+class ResourcePropertyUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=255)
+    data_type: Optional[str] = Field(None, min_length=1, max_length=50)
+    sensitivity: Optional[str] = Field(None, min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=1000)
+
+
+class ResourcePropertyInDB(ResourcePropertyBase):
+    id: str
+    resource_id: str
+    created_at: datetime
+    updated_at: datetime
+    rules: List[PropertyAuthorizationRuleInDB] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PropertyRuleBulkItem(BaseModel):
+    property_id: str
+    role_id: str
+    access: str = Field("UNKNOWN", max_length=20)  # ALLOW, DENY, UNKNOWN
+
+
+class PropertyMatrixBulkUpdate(BaseModel):
+    rules: List[PropertyRuleBulkItem]
+
+
+class PropertyMatrixRow(BaseModel):
+    id: str
+    name: str
+    data_type: str
+    sensitivity: str
+    description: Optional[str] = None
+    rules: Dict[str, str] = {}  # role_id -> access ("ALLOW" / "DENY" / "UNKNOWN")
+
+
+class PropertyMatrixView(BaseModel):
+    resource_id: str
+    resource_name: str
+    project_id: int
+    roles: List[RoleInDB] = []
+    properties: List[PropertyMatrixRow] = []
+    total_properties: int = 0
+
+
+class CandidateProperty(BaseModel):
+    path: str
+    data_type: str
+    suggested_sensitivity: str  # PUBLIC, INTERNAL, SENSITIVE, SECRET
+    matched_heuristic: Optional[str] = None
+    sample_value: Optional[str] = None
+
+
+class PropertyDiscoveryRequest(BaseModel):
+    sample_json: Optional[str] = None
+    endpoint_id: Optional[int] = None
+
+
+class PropertyDiscoveryResponse(BaseModel):
+    discovered_properties: List[CandidateProperty] = []
+    total_discovered: int = 0

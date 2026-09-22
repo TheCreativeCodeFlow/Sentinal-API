@@ -156,6 +156,7 @@ class Resource(Base):
     api = relationship("API", back_populates="resources")
     ownerships = relationship("ResourceOwnership", back_populates="resource", cascade="all, delete-orphan")
     endpoints = relationship("Endpoint", back_populates="resource")
+    properties = relationship("ResourceProperty", back_populates="resource", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("ix_resources_project_name", "project_id", "name", unique=True),
@@ -291,7 +292,8 @@ class Finding(Base):
     endpoint_id = Column(Integer, ForeignKey("endpoints.id", ondelete="SET NULL"), nullable=True, index=True)
     attacker_identity_id = Column(String(36), ForeignKey("identities.id", ondelete="SET NULL"), nullable=True, index=True)
     attacker_role_id = Column(String(36), ForeignKey("roles.id", ondelete="SET NULL"), nullable=True, index=True)
-    type = Column(String(50), nullable=False, default="BOLA", index=True)  # BOLA, BFLA
+    resource_id = Column(String(36), ForeignKey("resources.id", ondelete="SET NULL"), nullable=True, index=True)
+    type = Column(String(50), nullable=False, default="BOLA", index=True)  # BOLA, BFLA, PROPERTY_EXPOSURE
     severity = Column(String(50), nullable=False, default="HIGH", index=True)  # LOW, MEDIUM, HIGH, CRITICAL
     confidence = Column(String(50), nullable=False, default="HIGH")  # LOW, MEDIUM, HIGH
     status = Column(String(50), nullable=False, default="OPEN", index=True)  # OPEN, RESOLVED, FALSE_POSITIVE
@@ -299,6 +301,7 @@ class Finding(Base):
     description = Column(Text, nullable=False)
     expected_authorization = Column(String(50), nullable=True)  # e.g., DENY, ALLOW
     actual_behavior = Column(Text, nullable=True)
+    exposed_properties = Column(Text, nullable=True)  # JSON-encoded list of exposed property paths
     remediation = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(
@@ -312,6 +315,7 @@ class Finding(Base):
     endpoint = relationship("Endpoint")
     attacker_identity = relationship("Identity", foreign_keys=[attacker_identity_id])
     attacker_role = relationship("Role", foreign_keys=[attacker_role_id])
+    resource = relationship("Resource", foreign_keys=[resource_id])
 
     __table_args__ = (
         Index("ix_findings_project_severity", "project_id", "severity"),
@@ -406,4 +410,53 @@ class AuthorizationMatrixRule(Base):
 
     __table_args__ = (
         Index("ix_matrix_endpoint_role_method", "endpoint_id", "role_id", "http_method"),
+    )
+
+
+# ==============================================================================
+# STAGE 5: Property Security Models
+# ==============================================================================
+
+class ResourceProperty(Base):
+    __tablename__ = "resource_properties"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    resource_id = Column(String(36), ForeignKey("resources.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    data_type = Column(String(50), nullable=False, default="string")  # string, number, boolean, object, array
+    sensitivity = Column(String(50), nullable=False, default="INTERNAL")  # PUBLIC, INTERNAL, SENSITIVE, SECRET
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    resource = relationship("Resource", back_populates="properties")
+    rules = relationship("PropertyAuthorizationRule", back_populates="property", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("ix_resource_properties_res_name", "resource_id", "name", unique=True),
+        Index("ix_resource_properties_sensitivity", "sensitivity"),
+    )
+
+
+class PropertyAuthorizationRule(Base):
+    __tablename__ = "property_authorization_rules"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    resource_property_id = Column(
+        String(36), ForeignKey("resource_properties.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    role_id = Column(String(36), ForeignKey("roles.id", ondelete="CASCADE"), nullable=False, index=True)
+    access = Column(String(20), nullable=False, default="UNKNOWN")  # ALLOW, DENY, UNKNOWN
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    property = relationship("ResourceProperty", back_populates="rules")
+    role = relationship("Role")
+
+    __table_args__ = (
+        Index("ix_property_rule_prop_role", "resource_property_id", "role_id", unique=True),
     )

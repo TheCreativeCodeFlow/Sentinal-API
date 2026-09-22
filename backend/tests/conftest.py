@@ -26,6 +26,8 @@ def db_engine():
         # Drop all tables and indexes completely
         with engine.connect() as conn:
             conn.execute(text("""
+                DROP TABLE IF EXISTS property_authorization_rules CASCADE;
+                DROP TABLE IF EXISTS resource_properties CASCADE;
                 DROP TABLE IF EXISTS endpoint_policy_allowed_roles CASCADE;
                 DROP TABLE IF EXISTS endpoint_policy_denied_roles CASCADE;
                 DROP TABLE IF EXISTS authorization_matrix_rules CASCADE;
