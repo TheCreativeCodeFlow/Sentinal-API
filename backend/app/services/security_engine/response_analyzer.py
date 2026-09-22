@@ -535,3 +535,8 @@ class ResponseAnalyzer:
             [],
         )
 
+
+extract_property_paths = ResponseAnalyzer.extract_property_paths
+classify_property_heuristic = ResponseAnalyzer.classify_property_heuristic
+discover_candidate_sensitive_properties = ResponseAnalyzer.discover_candidate_sensitive_properties
+

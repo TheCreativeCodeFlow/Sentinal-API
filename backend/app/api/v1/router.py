@@ -2515,7 +2515,8 @@ def discover_properties(
         return PropertyDiscoveryResponse(discovered_properties=[], total_discovered=0)
 
     paths = extract_property_paths(data_payload)
-    candidate_map = discover_candidate_sensitive_properties(data_payload)
+    candidate_list = discover_candidate_sensitive_properties(data_payload)
+    candidate_map = {c["path"]: c for c in candidate_list}
 
     def _get_path_sample_and_type(obj, path: str):
         parts = [p.replace("[]", "") for p in path.split(".")]
