@@ -106,7 +106,7 @@ export default function SecurityTestsPage() {
 
   // Create Test Modal state
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [selectedTestType, setSelectedTestType] = useState<"BOLA" | "BFLA">("BOLA");
+  const [selectedTestType, setSelectedTestType] = useState<"BOLA" | "BFLA" | "PROPERTY_EXPOSURE">("BOLA");
   const [expectedAccess, setExpectedAccess] = useState<"DENY" | "ALLOW">("DENY");
   const [selectedEndpointId, setSelectedEndpointId] = useState<number | "">("");
   const [selectedAttackerId, setSelectedAttackerId] = useState<string>("");
@@ -251,28 +251,39 @@ export default function SecurityTestsPage() {
 
     setSubmitting(true);
     try {
-      const payload =
-        selectedTestType === "BOLA"
-          ? {
-              endpoint_id: Number(selectedEndpointId),
-              test_type: "BOLA",
-              attacker_identity_id: selectedAttackerId,
-              victim_identity_id: selectedVictimId || null,
-              victim_resource_id: selectedResourceId || null,
-              victim_resource_instance_id: victimInstanceId.trim(),
-              attacker_resource_instance_id: attackerInstanceId.trim() || null,
-              expected_access: expectedAccess,
-            }
-          : {
-              endpoint_id: Number(selectedEndpointId),
-              test_type: "BFLA",
-              attacker_identity_id: selectedAttackerId,
-              expected_access: expectedAccess,
-              victim_identity_id: null,
-              victim_resource_id: null,
-              victim_resource_instance_id: null,
-              attacker_resource_instance_id: null,
-            };
+      let payload;
+      if (selectedTestType === "BOLA") {
+        payload = {
+          endpoint_id: Number(selectedEndpointId),
+          test_type: "BOLA",
+          attacker_identity_id: selectedAttackerId,
+          victim_identity_id: selectedVictimId || null,
+          victim_resource_id: selectedResourceId || null,
+          victim_resource_instance_id: victimInstanceId.trim(),
+          attacker_resource_instance_id: attackerInstanceId.trim() || null,
+          expected_access: expectedAccess,
+        };
+      } else if (selectedTestType === "PROPERTY_EXPOSURE") {
+        payload = {
+          endpoint_id: Number(selectedEndpointId),
+          test_type: "PROPERTY_EXPOSURE",
+          attacker_identity_id: selectedAttackerId,
+          victim_resource_id: selectedResourceId || selectedEpObj?.resource_id || null,
+          victim_resource_instance_id: victimInstanceId.trim() || null,
+          expected_access: "DENY",
+        };
+      } else {
+        payload = {
+          endpoint_id: Number(selectedEndpointId),
+          test_type: "BFLA",
+          attacker_identity_id: selectedAttackerId,
+          expected_access: expectedAccess,
+          victim_identity_id: null,
+          victim_resource_id: null,
+          victim_resource_instance_id: null,
+          attacker_resource_instance_id: null,
+        };
+      }
 
       const res = await fetch(`/api/v1/projects/${selectedProjectId}/security-tests/`, {
         method: "POST",
@@ -293,10 +304,9 @@ export default function SecurityTestsPage() {
       setSelectedResourceId("");
       setVictimInstanceId("");
       setAttackerInstanceId("");
-      setExpectedAccess("DENY");
       setReloadKey((k) => k + 1);
     } catch (err: unknown) {
-      alert("Error: " + (err instanceof Error ? err.message : "Creation failed"));
+      alert("Failed to create security test: " + (err instanceof Error ? err.message : "Validation error"));
     } finally {
       setSubmitting(false);
     }
@@ -346,6 +356,8 @@ export default function SecurityTestsPage() {
   const canSubmit =
     selectedTestType === "BOLA"
       ? isTargetAuthorized && isSafeMethod && isEpLinked && attackerHasAuth && !!victimInstanceId.trim()
+      : selectedTestType === "PROPERTY_EXPOSURE"
+      ? isTargetAuthorized && isSafeMethod && attackerHasAuth && !!selectedEndpointId && (!!selectedResourceId || isEpLinked)
       : isTargetAuthorized && isSafeMethod && attackerHasAuth && !!selectedEndpointId;
 
   // Filtered test list
@@ -428,6 +440,7 @@ export default function SecurityTestsPage() {
               <option value="ALL">All Types</option>
               <option value="BOLA">BOLA (Resource Authorization)</option>
               <option value="BFLA">BFLA (Function-Level Authorization)</option>
+              <option value="PROPERTY_EXPOSURE">Property Exposure (Field-Level)</option>
             </select>
           </div>
 
@@ -488,6 +501,7 @@ export default function SecurityTestsPage() {
           {filteredTests.map((test) => {
             const isExecuting = executingTestId === test.id;
             const isBFLA = test.test_type.toUpperCase() === "BFLA";
+            const isProp = test.test_type.toUpperCase() === "PROPERTY_EXPOSURE";
             return (
               <Card key={test.id} className="overflow-hidden border-border">
                 <div className="p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
@@ -495,7 +509,9 @@ export default function SecurityTestsPage() {
                     <div className="flex flex-wrap items-center gap-2">
                       <span
                         className={`text-xs font-mono font-bold px-2 py-0.5 rounded border ${
-                          isBFLA
+                          isProp
+                            ? "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20"
+                            : isBFLA
                             ? "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20"
                             : "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20"
                         }`}
@@ -510,7 +526,7 @@ export default function SecurityTestsPage() {
                       {/* Result Badge */}
                       {test.latest_result === "CONFIRMED" && (
                         <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-red-500/20 text-red-700 dark:text-red-300 border border-red-500/30 animate-pulse">
-                          {isBFLA ? "CONFIRMED BFLA" : "CONFIRMED BOLA"}
+                          {isProp ? "CONFIRMED PROPERTY EXPOSURE" : isBFLA ? "CONFIRMED BFLA" : "CONFIRMED BOLA"}
                         </span>
                       )}
                       {test.latest_result === "PASS" && (
@@ -624,28 +640,39 @@ export default function SecurityTestsPage() {
             </div>
 
             {/* Test Type Switcher Tabs */}
-            <div className="flex border border-border rounded-lg p-1 bg-muted/40">
+            <div className="flex border border-border rounded-lg p-1 bg-muted/40 gap-1">
               <button
                 type="button"
                 onClick={() => setSelectedTestType("BOLA")}
-                className={`flex-1 py-1.5 px-3 rounded-md text-xs font-semibold transition-all ${
+                className={`flex-1 py-1.5 px-2 rounded-md text-xs font-semibold transition-all ${
                   selectedTestType === "BOLA"
                     ? "bg-card text-foreground shadow-xs"
                     : "text-muted-foreground hover:text-foreground"
                 }`}
               >
-                BOLA (Resource Authorization)
+                BOLA (Resource)
               </button>
               <button
                 type="button"
                 onClick={() => setSelectedTestType("BFLA")}
-                className={`flex-1 py-1.5 px-3 rounded-md text-xs font-semibold transition-all ${
+                className={`flex-1 py-1.5 px-2 rounded-md text-xs font-semibold transition-all ${
                   selectedTestType === "BFLA"
                     ? "bg-card text-foreground shadow-xs"
                     : "text-muted-foreground hover:text-foreground"
                 }`}
               >
-                BFLA (Function-Level Authorization)
+                BFLA (Function)
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedTestType("PROPERTY_EXPOSURE")}
+                className={`flex-1 py-1.5 px-2 rounded-md text-xs font-semibold transition-all ${
+                  selectedTestType === "PROPERTY_EXPOSURE"
+                    ? "bg-card text-foreground shadow-xs"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                Property Exposure
               </button>
             </div>
 
@@ -777,6 +804,48 @@ export default function SecurityTestsPage() {
                 </>
               )}
 
+              {/* Property Exposure Specific: Resource & Instance ID */}
+              {selectedTestType === "PROPERTY_EXPOSURE" && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-xs font-semibold text-muted-foreground uppercase">
+                      3. Domain Resource *
+                    </label>
+                    <select
+                      className="mt-1 w-full h-9 rounded-md border border-input bg-background px-3 py-1 text-sm shadow-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      value={selectedResourceId || selectedEpObj?.resource_id || ""}
+                      onChange={(e) => setSelectedResourceId(e.target.value)}
+                      required
+                    >
+                      <option value="">-- Select domain resource --</option>
+                      {resources.map((res) => (
+                        <option key={res.id} value={res.id}>
+                          {res.name}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Protected fields defined on this resource with DENY policy will be evaluated.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-semibold text-muted-foreground uppercase">
+                      Target Instance ID (Optional)
+                    </label>
+                    <Input
+                      className="mt-1 font-mono text-sm"
+                      placeholder="e.g. user_bob_002"
+                      value={victimInstanceId}
+                      onChange={(e) => setVictimInstanceId(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Substituted if the endpoint path contains a parameter like {"{user_id}"}.
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {/* Safety & Pre-flight Validation Checklist */}
               <div className="p-3.5 rounded-lg border border-border bg-card/60 space-y-2 text-xs">
                 <div className="font-semibold text-foreground uppercase tracking-wider">
@@ -800,6 +869,17 @@ export default function SecurityTestsPage() {
                       <div className="flex items-center gap-2">
                         <span>{victimInstanceId.trim() ? "✅" : "❌"}</span>
                         <span>Victim instance ID provided</span>
+                      </div>
+                    </>
+                  ) : selectedTestType === "PROPERTY_EXPOSURE" ? (
+                    <>
+                      <div className="flex items-center gap-2">
+                        <span>{attackerHasAuth ? "✅" : "❌"}</span>
+                        <span>Attacker identity selected</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span>{selectedResourceId || isEpLinked ? "✅" : "❌"}</span>
+                        <span>Domain resource configured</span>
                       </div>
                     </>
                   ) : (

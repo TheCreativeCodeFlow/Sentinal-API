@@ -46,6 +46,8 @@ interface FindingItem {
   attacker_role_name?: string | null;
   victim_resource_name: string | null;
   victim_resource_instance_id: string | null;
+  resource_id?: string | null;
+  exposed_properties?: string[] | null;
 }
 
 interface FindingDetailItem extends FindingItem {
@@ -239,6 +241,7 @@ export default function FindingsPage() {
             <option value="ALL">All Types</option>
             <option value="BOLA">BOLA (Resource Level)</option>
             <option value="BFLA">BFLA (Function Level)</option>
+            <option value="PROPERTY_EXPOSURE">Property Exposure (Field Level)</option>
           </select>
         </div>
 
@@ -302,6 +305,7 @@ export default function FindingsPage() {
         <div className="grid grid-cols-1 gap-3">
           {findings.map((finding) => {
             const isBFLA = finding.type.toUpperCase() === "BFLA";
+            const isProp = finding.type.toUpperCase() === "PROPERTY_EXPOSURE";
             return (
               <Card
                 key={finding.id}
@@ -320,7 +324,9 @@ export default function FindingsPage() {
                       </span>
                       <span
                         className={`text-xs font-mono font-bold px-2 py-0.5 rounded border ${
-                          isBFLA
+                          isProp
+                            ? "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20"
+                            : isBFLA
                             ? "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20"
                             : "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20"
                         }`}
@@ -338,6 +344,23 @@ export default function FindingsPage() {
                     <h3 className="font-bold text-foreground text-sm">{finding.title}</h3>
                     <p className="text-xs text-muted-foreground line-clamp-1">{finding.description}</p>
 
+                    {/* Exposed properties tags for Stage 5 */}
+                    {isProp && finding.exposed_properties && finding.exposed_properties.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                        <span className="text-[11px] font-semibold text-muted-foreground uppercase">
+                          Exposed:
+                        </span>
+                        {finding.exposed_properties.map((p) => (
+                          <span
+                            key={p}
+                            className="px-2 py-0.5 rounded text-xs font-mono font-semibold bg-rose-500/10 text-rose-400 border border-rose-500/20"
+                          >
+                            {p}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
                     <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground pt-1">
                       <div>
                         <span className="font-semibold text-foreground">Attacker:</span>{" "}
@@ -349,7 +372,7 @@ export default function FindingsPage() {
                       {!isBFLA && finding.victim_resource_name && (
                         <div>
                           <span className="font-semibold text-foreground">Resource:</span>{" "}
-                          {finding.victim_resource_name} ({finding.victim_resource_instance_id})
+                          {finding.victim_resource_name} {finding.victim_resource_instance_id ? `(${finding.victim_resource_instance_id})` : ""}
                         </div>
                       )}
                       {isBFLA && finding.expected_authorization && (
@@ -449,6 +472,41 @@ export default function FindingsPage() {
                   The configured boundary rule required access to be{" "}
                   <strong>{selectedFinding.expected_authorization || "DENY"}</strong>.
                 </p>
+              </div>
+            )}
+
+            {/* PROPERTY_EXPOSURE Alert Box */}
+            {selectedFinding.type.toUpperCase() === "PROPERTY_EXPOSURE" && (
+              <div className="p-3.5 rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-900 dark:text-amber-200 text-xs space-y-2">
+                <div className="font-semibold flex items-center gap-2">
+                  <span>🛡️</span>
+                  <span>Unauthorized Object Property Exposure</span>
+                </div>
+                <p className="leading-relaxed">
+                  Principal <strong>{selectedFinding.attacker_identity_name || "Attacker"}</strong>{" "}
+                  with assigned role <strong>{selectedFinding.attacker_role_name || "Unassigned"}</strong>{" "}
+                  was able to view protected fields in the API response from{" "}
+                  <code className="font-mono font-bold bg-background/50 px-1 py-0.5 rounded">
+                    {selectedFinding.endpoint_method} {selectedFinding.endpoint_path}
+                  </code>.
+                </p>
+                {selectedFinding.exposed_properties && selectedFinding.exposed_properties.length > 0 && (
+                  <div className="pt-1">
+                    <span className="font-semibold text-foreground uppercase tracking-wider block mb-1">
+                      Exposed Protected Properties:
+                    </span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {selectedFinding.exposed_properties.map((p) => (
+                        <span
+                          key={p}
+                          className="px-2 py-0.5 rounded font-mono text-xs font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40"
+                        >
+                          {p}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
