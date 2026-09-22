@@ -18,6 +18,8 @@ from app.models import (
     Evidence,
     EndpointAuthorizationPolicy,
     AuthorizationMatrixRule,
+    ResourceProperty,
+    PropertyAuthorizationRule,
 )
 from app.schemas import (
     ProjectCreate,
@@ -71,6 +73,20 @@ from app.schemas import (
     AuthorizationMatrixView,
     BFLATestGenerateRequest,
     BFLATestGenerateResult,
+    ResourcePropertyBase,
+    ResourcePropertyCreate,
+    ResourcePropertyUpdate,
+    ResourcePropertyInDB,
+    PropertyAuthorizationRuleBase,
+    PropertyAuthorizationRuleCreate,
+    PropertyAuthorizationRuleInDB,
+    PropertyRuleBulkItem,
+    PropertyMatrixBulkUpdate,
+    PropertyMatrixRow,
+    PropertyMatrixView,
+    CandidateProperty,
+    PropertyDiscoveryRequest,
+    PropertyDiscoveryResponse,
 )
 
 
@@ -177,6 +193,17 @@ def get_execution_or_404(execution_id: str, db: Session) -> TestExecution:
             detail=f"Test execution with id {execution_id} not found",
         )
     return execution
+
+
+def get_property_or_404(property_id: str, db: Session) -> ResourceProperty:
+    """Helper to get resource property or raise 404."""
+    prop = db.query(ResourceProperty).filter(ResourceProperty.id == property_id).first()
+    if not prop:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Resource property with id {property_id} not found",
+        )
+    return prop
 
 
 def get_finding_or_404(finding_id: str, db: Session) -> Finding:
@@ -287,11 +314,39 @@ def format_execution_response(execution: TestExecution) -> TestExecutionInDB:
     )
 
 
+def format_property_response(prop: ResourceProperty) -> ResourcePropertyInDB:
+    rule_items = [
+        PropertyAuthorizationRuleInDB.model_validate(r)
+        for r in prop.rules
+    ]
+    return ResourcePropertyInDB(
+        id=prop.id,
+        resource_id=prop.resource_id,
+        name=prop.name,
+        data_type=prop.data_type,
+        sensitivity=prop.sensitivity,
+        description=prop.description,
+        created_at=prop.created_at,
+        updated_at=prop.updated_at,
+        rules=rule_items,
+    )
+
+
 def format_finding_response(finding: Finding, db: Session) -> FindingInDB:
     endpoint = finding.endpoint or (finding.security_test.endpoint if finding.security_test else None)
     attacker = finding.attacker_identity or (finding.security_test.attacker_identity if finding.security_test else None)
     attacker_role = finding.attacker_role or (attacker.role if attacker else None)
     victim_res = finding.security_test.victim_resource if finding.security_test else None
+    if not victim_res and finding.resource_id:
+        victim_res = db.query(Resource).filter(Resource.id == finding.resource_id).first()
+
+    exposed_props = None
+    if finding.exposed_properties:
+        try:
+            exposed_props = json.loads(finding.exposed_properties)
+        except Exception:
+            exposed_props = [finding.exposed_properties]
+
     return FindingInDB(
         id=finding.id,
         project_id=finding.project_id,
@@ -313,6 +368,8 @@ def format_finding_response(finding: Finding, db: Session) -> FindingInDB:
         updated_at=finding.updated_at,
         endpoint_method=endpoint.method if endpoint else None,
         endpoint_path=endpoint.path if endpoint else None,
+        resource_id=finding.resource_id or (victim_res.id if victim_res else None),
+        exposed_properties=exposed_props,
         attacker_identity_name=attacker.name if attacker else None,
         attacker_role_name=attacker_role.name if attacker_role else None,
         victim_resource_name=victim_res.name if victim_res else None,
@@ -1343,13 +1400,53 @@ def create_security_test(
         )
 
     is_bfla = (test_in.test_type or "BOLA").upper() == "BFLA"
+    is_prop = (test_in.test_type or "BOLA").upper() == "PROPERTY_EXPOSURE"
     victim_resource_id = None
     victim_instance_id = None
     attacker_instance_id = None
     victim_identity_id = None
     expected_access = test_in.expected_access or "DENY"
 
-    if is_bfla:
+    if is_prop:
+        # Property Exposure testing: check property exposure for role on resource
+        res_id = test_in.victim_resource_id or endpoint.resource_id
+        if not res_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Endpoint or test configuration must be associated with a domain resource for property exposure testing.",
+            )
+        victim_resource = get_resource_or_404(res_id, db)
+        if victim_resource.project_id != project_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Victim resource belongs to a different project",
+            )
+        victim_resource_id = victim_resource.id
+
+        if test_in.victim_identity_id:
+            victim_ident = get_identity_or_404(test_in.victim_identity_id, db)
+            if victim_ident.project_id != project_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Victim identity belongs to a different project",
+                )
+            victim_identity_id = victim_ident.id
+
+        victim_instance_id = test_in.victim_resource_instance_id
+        if not victim_instance_id:
+            query = db.query(ResourceOwnership).filter(
+                ResourceOwnership.resource_id == victim_resource.id,
+                ResourceOwnership.resource_instance_id.isnot(None),
+            )
+            if test_in.victim_identity_id:
+                query = query.filter(ResourceOwnership.identity_id == test_in.victim_identity_id)
+            ownership = query.first()
+            if ownership and ownership.resource_instance_id:
+                victim_instance_id = ownership.resource_instance_id
+
+        attacker_instance_id = test_in.attacker_resource_instance_id
+
+    elif is_bfla:
         # BFLA testing: function-level authorization
         # Validate attacker credentials if not anonymous
         is_anon = (
@@ -1477,7 +1574,7 @@ async def execute_security_test(
     test_id: str,
     db: Session = Depends(get_db),
 ):
-    """Execute a configured security test asynchronously (BOLA or BFLA)."""
+    """Execute a configured security test asynchronously (BOLA, BFLA, or PROPERTY_EXPOSURE)."""
     test = get_security_test_or_404(test_id, db)
 
     # Safety validation
@@ -1490,9 +1587,12 @@ async def execute_security_test(
     from app.main import app as fastapi_app
     from app.services.security_engine.evaluator import BOLAEngine
     from app.services.security_engine.bfla_engine import BFLAEngine
+    from app.services.security_engine.property_engine import PropertyExposureEngine
 
     if test.test_type.upper() == "BFLA":
         engine = BFLAEngine(db=db, app=fastapi_app)
+    elif test.test_type.upper() == "PROPERTY_EXPOSURE":
+        engine = PropertyExposureEngine(db=db, app=fastapi_app)
     else:
         engine = BOLAEngine(db=db, app=fastapi_app)
 
@@ -1625,9 +1725,12 @@ async def replay_test_for_finding(
     from app.main import app as fastapi_app
     from app.services.security_engine.evaluator import BOLAEngine
     from app.services.security_engine.bfla_engine import BFLAEngine
+    from app.services.security_engine.property_engine import PropertyExposureEngine
 
     if (test and test.test_type.upper() == "BFLA") or finding.type.upper() == "BFLA":
         engine = BFLAEngine(db=db, app=fastapi_app)
+    elif (test and test.test_type.upper() == "PROPERTY_EXPOSURE") or finding.type.upper() == "PROPERTY_EXPOSURE":
+        engine = PropertyExposureEngine(db=db, app=fastapi_app)
     else:
         engine = BOLAEngine(db=db, app=fastapi_app)
 
@@ -2001,6 +2104,488 @@ def update_endpoint_policy(
     return format_policy_response(policy, db)
 
 
+# --- Property Security Routes ---
+
+property_router = APIRouter(tags=["Property Security"])
+
+
+@property_router.get("/resources/{resource_id}/properties", response_model=List[ResourcePropertyInDB])
+def list_resource_properties(
+    resource_id: str,
+    db: Session = Depends(get_db),
+):
+    """List all defined properties for a resource."""
+    get_resource_or_404(resource_id, db)
+    props = (
+        db.query(ResourceProperty)
+        .filter(ResourceProperty.resource_id == resource_id)
+        .order_by(ResourceProperty.name)
+        .all()
+    )
+    return [format_property_response(p) for p in props]
+
+
+@property_router.post("/resources/{resource_id}/properties", response_model=ResourcePropertyInDB, status_code=status.HTTP_201_CREATED)
+def create_resource_property(
+    resource_id: str,
+    prop_in: ResourcePropertyCreate,
+    db: Session = Depends(get_db),
+):
+    """Create a new property for a domain resource."""
+    resource = get_resource_or_404(resource_id, db)
+    existing = (
+        db.query(ResourceProperty)
+        .filter(
+            ResourceProperty.resource_id == resource_id,
+            ResourceProperty.name == prop_in.name,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Property '{prop_in.name}' already exists for resource '{resource.name}'",
+        )
+
+    sens = (prop_in.sensitivity or "INTERNAL").upper()
+    valid_sensitivities = ["PUBLIC", "INTERNAL", "SENSITIVE", "SECRET"]
+    if sens not in valid_sensitivities:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid sensitivity '{sens}'. Must be one of: {', '.join(valid_sensitivities)}",
+        )
+
+    new_prop = ResourceProperty(
+        resource_id=resource.id,
+        name=prop_in.name,
+        data_type=prop_in.data_type or "string",
+        sensitivity=sens,
+        description=prop_in.description,
+    )
+    db.add(new_prop)
+    db.flush()
+
+    if prop_in.initial_rules:
+        for role_id, access in prop_in.initial_rules.items():
+            role = get_role_or_404(role_id, db)
+            if role.project_id != resource.project_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Role {role.name} belongs to a different project",
+                )
+            acc = access.upper()
+            if acc in ["ALLOW", "DENY", "UNKNOWN"]:
+                rule = PropertyAuthorizationRule(
+                    resource_property_id=new_prop.id,
+                    role_id=role.id,
+                    access=acc,
+                )
+                db.add(rule)
+
+    db.commit()
+    db.refresh(new_prop)
+    return format_property_response(new_prop)
+
+
+@property_router.post("/resources/{resource_id}/properties/bulk", response_model=List[ResourcePropertyInDB], status_code=status.HTTP_201_CREATED)
+def bulk_create_resource_properties(
+    resource_id: str,
+    props_in: List[ResourcePropertyCreate],
+    db: Session = Depends(get_db),
+):
+    """Bulk create or update properties for a resource."""
+    resource = get_resource_or_404(resource_id, db)
+    created_props = []
+    valid_sensitivities = ["PUBLIC", "INTERNAL", "SENSITIVE", "SECRET"]
+
+    for prop_in in props_in:
+        existing = (
+            db.query(ResourceProperty)
+            .filter(
+                ResourceProperty.resource_id == resource_id,
+                ResourceProperty.name == prop_in.name,
+            )
+            .first()
+        )
+        if existing:
+            if prop_in.data_type:
+                existing.data_type = prop_in.data_type
+            if prop_in.sensitivity:
+                sens = prop_in.sensitivity.upper()
+                if sens in valid_sensitivities:
+                    existing.sensitivity = sens
+            if prop_in.description is not None:
+                existing.description = prop_in.description
+            created_props.append(existing)
+            continue
+
+        sens = (prop_in.sensitivity or "INTERNAL").upper()
+        if sens not in valid_sensitivities:
+            sens = "INTERNAL"
+
+        new_prop = ResourceProperty(
+            resource_id=resource.id,
+            name=prop_in.name,
+            data_type=prop_in.data_type or "string",
+            sensitivity=sens,
+            description=prop_in.description,
+        )
+        db.add(new_prop)
+        created_props.append(new_prop)
+
+    db.commit()
+    for p in created_props:
+        db.refresh(p)
+    return [format_property_response(p) for p in created_props]
+
+
+@property_router.get("/properties/{property_id}", response_model=ResourcePropertyInDB)
+def get_resource_property(
+    property_id: str,
+    db: Session = Depends(get_db),
+):
+    """Get single resource property detail with rules."""
+    prop = get_property_or_404(property_id, db)
+    return format_property_response(prop)
+
+
+@property_router.put("/properties/{property_id}", response_model=ResourcePropertyInDB)
+def update_resource_property(
+    property_id: str,
+    prop_in: ResourcePropertyUpdate,
+    db: Session = Depends(get_db),
+):
+    """Update resource property definition."""
+    prop = get_property_or_404(property_id, db)
+    if prop_in.name is not None:
+        existing = (
+            db.query(ResourceProperty)
+            .filter(
+                ResourceProperty.resource_id == prop.resource_id,
+                ResourceProperty.name == prop_in.name,
+                ResourceProperty.id != property_id,
+            )
+            .first()
+        )
+        if existing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Property '{prop_in.name}' already exists for this resource",
+            )
+        prop.name = prop_in.name
+    if prop_in.data_type is not None:
+        prop.data_type = prop_in.data_type
+    if prop_in.sensitivity is not None:
+        sens = prop_in.sensitivity.upper()
+        valid_sensitivities = ["PUBLIC", "INTERNAL", "SENSITIVE", "SECRET"]
+        if sens not in valid_sensitivities:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid sensitivity '{sens}'. Must be one of: {', '.join(valid_sensitivities)}",
+            )
+        prop.sensitivity = sens
+    if prop_in.description is not None:
+        prop.description = prop_in.description
+
+    db.commit()
+    db.refresh(prop)
+    return format_property_response(prop)
+
+
+@property_router.delete("/properties/{property_id}", status_code=status.HTTP_200_OK)
+def delete_resource_property(
+    property_id: str,
+    db: Session = Depends(get_db),
+):
+    """Delete a resource property and its authorization rules."""
+    prop = get_property_or_404(property_id, db)
+    db.query(PropertyAuthorizationRule).filter(
+        PropertyAuthorizationRule.resource_property_id == property_id
+    ).delete()
+    db.delete(prop)
+    db.commit()
+    return {"message": "Resource property and associated rules deleted successfully"}
+
+
+@property_router.get("/resources/{resource_id}/property-matrix", response_model=PropertyMatrixView)
+def get_resource_property_matrix(
+    resource_id: str,
+    db: Session = Depends(get_db),
+):
+    """Get the Property Authorization Matrix (Properties x Roles) for a resource."""
+    resource = get_resource_or_404(resource_id, db)
+    roles = db.query(Role).filter(Role.project_id == resource.project_id).order_by(Role.name).all()
+    properties = (
+        db.query(ResourceProperty)
+        .filter(ResourceProperty.resource_id == resource_id)
+        .order_by(ResourceProperty.name)
+        .all()
+    )
+
+    matrix_rows = []
+    for prop in properties:
+        rule_map = {rule.role_id: rule.access for rule in prop.rules}
+        for role in roles:
+            if role.id not in rule_map:
+                rule_map[role.id] = "UNKNOWN"
+        matrix_rows.append(
+            PropertyMatrixRow(
+                id=prop.id,
+                name=prop.name,
+                data_type=prop.data_type,
+                sensitivity=prop.sensitivity,
+                description=prop.description,
+                rules=rule_map,
+            )
+        )
+
+    return PropertyMatrixView(
+        resource_id=resource.id,
+        resource_name=resource.name,
+        project_id=resource.project_id,
+        roles=[format_role_response(r, db) for r in roles],
+        properties=matrix_rows,
+        total_properties=len(matrix_rows),
+    )
+
+
+@property_router.post("/properties/{property_id}/rules", response_model=PropertyAuthorizationRuleInDB)
+def set_property_rule(
+    property_id: str,
+    rule_in: PropertyAuthorizationRuleCreate,
+    db: Session = Depends(get_db),
+):
+    """Set or update an authorization rule for a single property and role."""
+    prop = get_property_or_404(property_id, db)
+    role = get_role_or_404(rule_in.role_id, db)
+    if role.project_id != prop.resource.project_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Role belongs to a different project than resource",
+        )
+
+    access = rule_in.access.upper()
+    if access not in ["ALLOW", "DENY", "UNKNOWN"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Access must be ALLOW, DENY, or UNKNOWN",
+        )
+
+    rule = (
+        db.query(PropertyAuthorizationRule)
+        .filter(
+            PropertyAuthorizationRule.resource_property_id == property_id,
+            PropertyAuthorizationRule.role_id == rule_in.role_id,
+        )
+        .first()
+    )
+
+    if rule:
+        rule.access = access
+    else:
+        rule = PropertyAuthorizationRule(
+            resource_property_id=property_id,
+            role_id=rule_in.role_id,
+            access=access,
+        )
+        db.add(rule)
+
+    db.commit()
+    db.refresh(rule)
+    return PropertyAuthorizationRuleInDB.model_validate(rule)
+
+
+@property_router.put("/resources/{resource_id}/property-matrix/bulk", response_model=PropertyMatrixView)
+def bulk_update_property_matrix(
+    resource_id: str,
+    bulk_in: PropertyMatrixBulkUpdate,
+    db: Session = Depends(get_db),
+):
+    """Bulk update property authorization rules for a resource."""
+    resource = get_resource_or_404(resource_id, db)
+
+    for item in bulk_in.rules:
+        prop = get_property_or_404(item.property_id, db)
+        if prop.resource_id != resource_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Property {prop.id} does not belong to resource {resource_id}",
+            )
+        role = get_role_or_404(item.role_id, db)
+        if role.project_id != resource.project_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Role {role.id} belongs to a different project",
+            )
+        access = item.access.upper()
+        if access not in ["ALLOW", "DENY", "UNKNOWN"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid access '{item.access}'. Must be ALLOW, DENY, or UNKNOWN",
+            )
+
+        rule = (
+            db.query(PropertyAuthorizationRule)
+            .filter(
+                PropertyAuthorizationRule.resource_property_id == item.property_id,
+                PropertyAuthorizationRule.role_id == item.role_id,
+            )
+            .first()
+        )
+
+        if rule:
+            rule.access = access
+        else:
+            rule = PropertyAuthorizationRule(
+                resource_property_id=item.property_id,
+                role_id=item.role_id,
+                access=access,
+            )
+            db.add(rule)
+
+    db.commit()
+    return get_resource_property_matrix(resource_id, db)
+
+
+@property_router.post("/resources/{resource_id}/discover-properties", response_model=PropertyDiscoveryResponse)
+def discover_properties(
+    resource_id: str,
+    req_in: PropertyDiscoveryRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Discover candidate properties from a sample JSON response or recorded endpoint execution evidence.
+    Applies heuristic sensitivity classification (e.g. token, secret, role, notes).
+    Does NOT automatically create findings or mutate resources without user action.
+    """
+    resource = get_resource_or_404(resource_id, db)
+    from app.services.security_engine.response_analyzer import (
+        extract_property_paths,
+        discover_candidate_sensitive_properties,
+        classify_property_heuristic,
+    )
+
+    data_payload = None
+
+    if req_in.sample_json:
+        try:
+            data_payload = json.loads(req_in.sample_json)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid JSON provided in sample_json: {str(e)}",
+            )
+    elif req_in.endpoint_id:
+        endpoint = get_endpoint_or_404(req_in.endpoint_id, db)
+        if endpoint.api and endpoint.api.project_id != resource.project_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Endpoint belongs to a different project",
+            )
+        latest_exec = (
+            db.query(TestExecution)
+            .join(TestExecution.security_test)
+            .filter(SecurityTest.endpoint_id == endpoint.id)
+            .order_by(TestExecution.created_at.desc())
+            .first()
+        )
+        if latest_exec and latest_exec.evidence and latest_exec.evidence.response_metadata:
+            try:
+                resp_meta = json.loads(latest_exec.evidence.response_metadata)
+                body = resp_meta.get("body")
+                if isinstance(body, (dict, list)):
+                    data_payload = body
+                elif isinstance(body, str):
+                    data_payload = json.loads(body)
+            except Exception:
+                pass
+
+        if data_payload is None and endpoint.schemas:
+            schema_data = endpoint.schemas[0]
+            if schema_data.schema_metadata:
+                try:
+                    s_meta = json.loads(schema_data.schema_metadata)
+                    props = s_meta.get("properties", {})
+                    if props:
+                        data_payload = {k: "sample" for k in props.keys()}
+                except Exception:
+                    pass
+
+    if data_payload is None:
+        return PropertyDiscoveryResponse(discovered_properties=[], total_discovered=0)
+
+    paths = extract_property_paths(data_payload)
+    candidate_map = discover_candidate_sensitive_properties(data_payload)
+
+    def _get_path_sample_and_type(obj, path: str):
+        parts = [p.replace("[]", "") for p in path.split(".")]
+        curr = obj
+        for p in parts:
+            if isinstance(curr, list) and curr:
+                curr = curr[0]
+            if isinstance(curr, dict) and p in curr:
+                curr = curr[p]
+            else:
+                return "string", None
+        if isinstance(curr, bool):
+            return "boolean", str(curr).lower()
+        elif isinstance(curr, (int, float)):
+            return "number", str(curr)
+        elif isinstance(curr, dict):
+            return "object", "{...}"
+        elif isinstance(curr, list):
+            return "array", "[...]"
+        elif curr is None:
+            return "null", None
+        return "string", str(curr)[:100]
+
+    results = []
+    seen = set()
+    for path in sorted(paths):
+        if path in seen:
+            continue
+        seen.add(path)
+        d_type, sample = _get_path_sample_and_type(data_payload, path)
+        if path in candidate_map:
+            cand_info = candidate_map[path]
+            results.append(
+                CandidateProperty(
+                    path=path,
+                    data_type=d_type,
+                    suggested_sensitivity=cand_info.get("suggested_sensitivity", "SENSITIVE"),
+                    matched_heuristic=cand_info.get("matched_keyword"),
+                    sample_value=sample,
+                )
+            )
+        else:
+            heuristic = classify_property_heuristic(path)
+            if heuristic:
+                results.append(
+                    CandidateProperty(
+                        path=path,
+                        data_type=d_type,
+                        suggested_sensitivity=heuristic.get("suggested_sensitivity", "INTERNAL"),
+                        matched_heuristic=heuristic.get("matched_keyword"),
+                        sample_value=sample,
+                    )
+                )
+            else:
+                results.append(
+                    CandidateProperty(
+                        path=path,
+                        data_type=d_type,
+                        suggested_sensitivity="PUBLIC",
+                        matched_heuristic=None,
+                        sample_value=sample,
+                    )
+                )
+
+    return PropertyDiscoveryResponse(
+        discovered_properties=results,
+        total_discovered=len(results),
+    )
+
+
 # Include sub-routers into main router
 router.include_router(project_router)
 router.include_router(api_router)
@@ -2015,3 +2600,4 @@ router.include_router(security_test_router)
 router.include_router(finding_router)
 router.include_router(matrix_router)
 router.include_router(policy_router)
+router.include_router(property_router)
