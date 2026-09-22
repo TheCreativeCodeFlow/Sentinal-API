@@ -613,8 +613,9 @@ class ResponseAnalyzer:
             if ident:
                 indicators.extend([f"id:{i}" for i in ident[:3]])
             sens = cls.extract_sensitive_fields(parsed_json)
-            if sens:
-                indicators.extend([f"sensitive:{s}" for s in sens[:3]])
+            for s in sens:
+                if s.lower() not in ("authenticated", "is_authenticated", "auth", "authorized", "status"):
+                    indicators.append(f"sensitive:{s}")
 
         elif isinstance(parsed_json, list) and len(parsed_json) > 0:
             indicators.append(f"record array with {len(parsed_json)} item(s)")
@@ -767,4 +768,7 @@ discover_candidate_sensitive_properties = ResponseAnalyzer.discover_candidate_se
 evaluate_authentication_result = ResponseAnalyzer.evaluate_authentication_result
 is_application_denial = ResponseAnalyzer.is_application_denial
 contains_protected_data = ResponseAnalyzer.contains_protected_data
+build_signature = ResponseAnalyzer.analyze
+ResponseAnalyzer.build_signature = ResponseAnalyzer.analyze
+
 

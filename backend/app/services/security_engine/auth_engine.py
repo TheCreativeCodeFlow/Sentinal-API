@@ -271,7 +271,7 @@ class AuthenticationEngine:
             return execution
 
         # 9. Build response signature and evaluate authentication result
-        signature: ResponseSignature = ResponseAnalyzer.build_signature(
+        signature: ResponseSignature = ResponseAnalyzer.analyze(
             status_code=http_result.status_code or 0,
             headers=http_result.headers,
             body=http_result.body,
@@ -364,21 +364,21 @@ class AuthenticationEngine:
         evidence = Evidence(
             execution_id=execution.id,
             finding_id=finding_id,
-            request_metadata={
+            request_metadata=json.dumps({
                 "method": endpoint.method,
                 "url": url,
                 "headers": http_result.redacted_request_headers,
                 "correlation_id": http_result.correlation_id,
                 "test_type": test_type,
                 "auth_scheme": auth_scheme,
-            },
-            response_metadata={
+            }),
+            response_metadata=json.dumps({
                 "status_code": http_result.status_code,
                 "duration_ms": http_result.duration_ms,
                 "headers": http_result.redacted_headers,
                 "is_json": signature.is_json,
                 "is_auth_failure": signature.is_auth_failure,
-            },
+            }),
             expected_behavior=f"Rejection with HTTP {expected_denial_status} or application-level denial",
             actual_behavior=reason,
             redacted_request=redacted_request_summary,

@@ -364,7 +364,7 @@ def demo_auth_error(authorization: Optional[str] = Header(None)):
         raise HTTPException(status_code=500, detail="Internal Server Error: Unhandled header format parsing crash")
 
     token = authorization[7:].strip()
-    if not token or token == "malformed" or " " in token or token == "Bearer":
+    if not token or "malformed" in token.lower() or " " in token or token == "Bearer":
         raise HTTPException(status_code=500, detail="Internal Server Error: Unhandled token decoding crash on malformed input")
 
     if token in DEMO_EXPIRED_TOKENS:
@@ -379,5 +379,15 @@ def demo_auth_error(authorization: Optional[str] = Header(None)):
         "user_id": user["id"],
         "user_name": user["name"],
     }
+
+
+@demo_target_router.get(
+    "/auth/server-error",
+    summary="[TEST ONLY] Unconditional Server Error Endpoint",
+    description="Simulates 500 error to test INCONCLUSIVE classification in authentication testing.",
+)
+def demo_auth_server_error():
+    raise HTTPException(status_code=500, detail="Internal Server Error: Database connection failure during auth verification")
+
 
 
