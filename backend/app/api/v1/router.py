@@ -20,6 +20,7 @@ from app.models import (
     AuthorizationMatrixRule,
     ResourceProperty,
     PropertyAuthorizationRule,
+    AuthenticationPolicy,
 )
 from app.schemas import (
     ProjectCreate,
@@ -87,6 +88,11 @@ from app.schemas import (
     CandidateProperty,
     PropertyDiscoveryRequest,
     PropertyDiscoveryResponse,
+    AuthenticationPolicyBase,
+    AuthenticationPolicyCreate,
+    AuthenticationPolicyUpdate,
+    AuthenticationPolicyInDB,
+    AuthTestGenerationResponse,
 )
 
 
@@ -370,6 +376,7 @@ def format_finding_response(finding: Finding, db: Session) -> FindingInDB:
         endpoint_path=endpoint.path if endpoint else None,
         resource_id=finding.resource_id or (victim_res.id if victim_res else None),
         exposed_properties=exposed_props,
+        authentication_mechanism=finding.authentication_mechanism,
         attacker_identity_name=attacker.name if attacker else None,
         attacker_role_name=attacker_role.name if attacker_role else None,
         victim_resource_name=victim_res.name if victim_res else None,
@@ -1391,23 +1398,35 @@ def create_security_test(
             detail=f"Method '{endpoint.method}' is not supported. Only safe HTTP methods (GET, HEAD) are allowed for security testing.",
         )
 
-    # 4. Validate Attacker Identity
-    attacker = get_identity_or_404(test_in.attacker_identity_id, db)
-    if attacker.project_id != project_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Attacker identity belongs to a different project",
-        )
-
     is_bfla = (test_in.test_type or "BOLA").upper() == "BFLA"
     is_prop = (test_in.test_type or "BOLA").upper() == "PROPERTY_EXPOSURE"
+    is_auth = (test_in.test_type or "BOLA").upper() in ("AUTH_MISSING", "AUTH_INVALID", "AUTH_MALFORMED", "AUTH_EXPIRED", "AUTH_SCHEME")
+
+    # 4. Validate Attacker Identity
+    attacker = None
+    if test_in.attacker_identity_id:
+        attacker = get_identity_or_404(test_in.attacker_identity_id, db)
+        if attacker.project_id != project_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Attacker identity belongs to a different project",
+            )
+    elif not is_auth:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="attacker_identity_id is required",
+        )
+
     victim_resource_id = None
     victim_instance_id = None
     attacker_instance_id = None
     victim_identity_id = None
     expected_access = test_in.expected_access or "DENY"
 
-    if is_prop:
+    if is_auth:
+        # Authentication testing does not require victim identity or domain resource binding
+        pass
+    elif is_prop:
         # Property Exposure testing: check property exposure for role on resource
         res_id = test_in.victim_resource_id or endpoint.resource_id
         if not res_id:
@@ -1526,7 +1545,7 @@ def create_security_test(
         project_id=project_id,
         endpoint_id=endpoint.id,
         test_type=test_in.test_type or "BOLA",
-        attacker_identity_id=attacker.id,
+        attacker_identity_id=attacker.id if attacker else None,
         victim_identity_id=victim_identity_id,
         victim_resource_id=victim_resource_id,
         victim_resource_instance_id=victim_instance_id,
@@ -1588,11 +1607,15 @@ async def execute_security_test(
     from app.services.security_engine.evaluator import BOLAEngine
     from app.services.security_engine.bfla_engine import BFLAEngine
     from app.services.security_engine.property_engine import PropertyExposureEngine
+    from app.services.security_engine.auth_engine import AuthenticationEngine
 
-    if test.test_type.upper() == "BFLA":
+    t_type = test.test_type.upper()
+    if t_type == "BFLA":
         engine = BFLAEngine(db=db, app=fastapi_app)
-    elif test.test_type.upper() == "PROPERTY_EXPOSURE":
+    elif t_type == "PROPERTY_EXPOSURE":
         engine = PropertyExposureEngine(db=db, app=fastapi_app)
+    elif t_type in ("AUTH_MISSING", "AUTH_INVALID", "AUTH_MALFORMED", "AUTH_EXPIRED", "AUTH_SCHEME"):
+        engine = AuthenticationEngine(db=db, app=fastapi_app)
     else:
         engine = BOLAEngine(db=db, app=fastapi_app)
 
@@ -1654,15 +1677,26 @@ def get_test_execution(
 
 # --- Findings Routes ---
 
+AUTH_FINDING_TYPES = [
+    "AUTHENTICATION_BYPASS",
+    "INVALID_AUTH_ACCEPTED",
+    "MALFORMED_AUTH_HANDLING",
+    "EXPIRED_AUTH_ACCEPTED",
+    "AUTHENTICATION_INCONSISTENCY",
+]
+
+
+@finding_router.get("/projects/{project_id}/findings", response_model=List[FindingInDB])
 @finding_router.get("/projects/{project_id}/findings/", response_model=List[FindingInDB])
 def list_findings_for_project(
     project_id: int,
     severity: Optional[str] = None,
     status_filter: Optional[str] = None,
     type_filter: Optional[str] = None,
+    category: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
-    """List findings for a project with optional filtering by severity, status, or type (BOLA/BFLA)."""
+    """List findings for a project with optional filtering by severity, status, category, or type."""
     get_project_or_404(project_id, db)
     query = db.query(Finding).filter(Finding.project_id == project_id)
     if severity:
@@ -1670,7 +1704,20 @@ def list_findings_for_project(
     if status_filter:
         query = query.filter(Finding.status == status_filter.upper())
     if type_filter:
-        query = query.filter(Finding.type == type_filter.upper())
+        if type_filter.upper() == "AUTHENTICATION":
+            query = query.filter(Finding.type.in_(AUTH_FINDING_TYPES))
+        else:
+            query = query.filter(Finding.type == type_filter.upper())
+    if category:
+        cat = category.upper().strip()
+        if cat == "AUTHENTICATION":
+            query = query.filter(Finding.type.in_(AUTH_FINDING_TYPES))
+        elif cat == "BOLA":
+            query = query.filter(Finding.type == "BOLA")
+        elif cat == "BFLA":
+            query = query.filter(Finding.type == "BFLA")
+        elif cat == "PROPERTY_EXPOSURE":
+            query = query.filter(Finding.type == "PROPERTY_EXPOSURE")
     findings = query.order_by(Finding.created_at.desc()).all()
     return [format_finding_response(f, db) for f in findings]
 
@@ -1726,11 +1773,19 @@ async def replay_test_for_finding(
     from app.services.security_engine.evaluator import BOLAEngine
     from app.services.security_engine.bfla_engine import BFLAEngine
     from app.services.security_engine.property_engine import PropertyExposureEngine
+    from app.services.security_engine.auth_engine import AuthenticationEngine
 
-    if (test and test.test_type.upper() == "BFLA") or finding.type.upper() == "BFLA":
+    t_type = test.test_type.upper() if test else ""
+    f_type = finding.type.upper() if finding else ""
+    if t_type == "BFLA" or f_type == "BFLA":
         engine = BFLAEngine(db=db, app=fastapi_app)
-    elif (test and test.test_type.upper() == "PROPERTY_EXPOSURE") or finding.type.upper() == "PROPERTY_EXPOSURE":
+    elif t_type == "PROPERTY_EXPOSURE" or f_type == "PROPERTY_EXPOSURE":
         engine = PropertyExposureEngine(db=db, app=fastapi_app)
+    elif (
+        t_type in ("AUTH_MISSING", "AUTH_INVALID", "AUTH_MALFORMED", "AUTH_EXPIRED", "AUTH_SCHEME")
+        or f_type in ("AUTHENTICATION_BYPASS", "INVALID_AUTH_ACCEPTED", "MALFORMED_AUTH_HANDLING", "EXPIRED_AUTH_ACCEPTED", "AUTHENTICATION_INCONSISTENCY")
+    ):
+        engine = AuthenticationEngine(db=db, app=fastapi_app)
     else:
         engine = BOLAEngine(db=db, app=fastapi_app)
 
@@ -2587,6 +2642,137 @@ def discover_properties(
     )
 
 
+# ==============================================================================
+# STAGE 6: Authentication Security Routes
+# ==============================================================================
+
+auth_security_router = APIRouter(tags=["Authentication Security"])
+
+
+@auth_security_router.get("/endpoints/{endpoint_id}/auth-policy", response_model=AuthenticationPolicyInDB)
+def get_endpoint_auth_policy(
+    endpoint_id: int,
+    db: Session = Depends(get_db),
+):
+    """Get the authentication policy for an endpoint."""
+    endpoint = get_endpoint_or_404(endpoint_id, db)
+    policy = (
+        db.query(AuthenticationPolicy)
+        .filter(AuthenticationPolicy.endpoint_id == endpoint.id)
+        .first()
+    )
+    if not policy:
+        now = datetime.now(timezone.utc)
+        return AuthenticationPolicyInDB(
+            id=f"default-{endpoint.id}",
+            project_id=endpoint.api.project_id if endpoint.api else 0,
+            endpoint_id=endpoint.id,
+            endpoint_method=endpoint.method,
+            endpoint_path=endpoint.path,
+            authentication_required=True,
+            authentication_scheme="bearer_token",
+            expected_denial_status=401,
+            notes=None,
+            created_at=now,
+            updated_at=now,
+        )
+
+    return AuthenticationPolicyInDB(
+        id=policy.id,
+        project_id=policy.project_id,
+        endpoint_id=policy.endpoint_id,
+        endpoint_method=endpoint.method,
+        endpoint_path=endpoint.path,
+        authentication_required=policy.authentication_required,
+        authentication_scheme=policy.authentication_scheme,
+        expected_denial_status=policy.expected_denial_status,
+        notes=policy.notes,
+        created_at=policy.created_at,
+        updated_at=policy.updated_at,
+    )
+
+
+@auth_security_router.put("/endpoints/{endpoint_id}/auth-policy", response_model=AuthenticationPolicyInDB)
+def update_endpoint_auth_policy(
+    endpoint_id: int,
+    policy_in: AuthenticationPolicyUpdate,
+    db: Session = Depends(get_db),
+):
+    """Create or update authentication policy for an endpoint."""
+    endpoint = get_endpoint_or_404(endpoint_id, db)
+    project_id = endpoint.api.project_id if endpoint.api else 0
+
+    policy = (
+        db.query(AuthenticationPolicy)
+        .filter(AuthenticationPolicy.endpoint_id == endpoint.id)
+        .first()
+    )
+
+    if not policy:
+        policy = AuthenticationPolicy(
+            project_id=project_id,
+            endpoint_id=endpoint.id,
+            authentication_required=policy_in.authentication_required if policy_in.authentication_required is not None else True,
+            authentication_scheme=policy_in.authentication_scheme or "bearer_token",
+            expected_denial_status=policy_in.expected_denial_status or 401,
+            notes=policy_in.notes,
+        )
+        db.add(policy)
+    else:
+        if policy_in.authentication_required is not None:
+            policy.authentication_required = policy_in.authentication_required
+        if policy_in.authentication_scheme is not None:
+            policy.authentication_scheme = policy_in.authentication_scheme
+        if policy_in.expected_denial_status is not None:
+            policy.expected_denial_status = policy_in.expected_denial_status
+        if policy_in.notes is not None:
+            policy.notes = policy_in.notes
+        policy.updated_at = datetime.now(timezone.utc)
+
+    db.commit()
+    db.refresh(policy)
+
+    return AuthenticationPolicyInDB(
+        id=policy.id,
+        project_id=policy.project_id,
+        endpoint_id=policy.endpoint_id,
+        endpoint_method=endpoint.method,
+        endpoint_path=endpoint.path,
+        authentication_required=policy.authentication_required,
+        authentication_scheme=policy.authentication_scheme,
+        expected_denial_status=policy.expected_denial_status,
+        notes=policy.notes,
+        created_at=policy.created_at,
+        updated_at=policy.updated_at,
+    )
+
+
+@auth_security_router.post("/projects/{project_id}/generate-auth-tests", response_model=AuthTestGenerationResponse)
+def generate_auth_tests_for_project(
+    project_id: int,
+    db: Session = Depends(get_db),
+):
+    """Automatically generate controlled authentication security tests for safe endpoints."""
+    from app.services.security_engine.auth_generator import AuthenticationTestGenerator
+    try:
+        created_tests, skipped = AuthenticationTestGenerator.generate_tests(
+            db=db,
+            project_id=project_id,
+        )
+        return AuthTestGenerationResponse(
+            project_id=project_id,
+            generated_count=len(created_tests),
+            skipped_count=skipped,
+            test_ids=[t.id for t in created_tests],
+            message=f"Generated {len(created_tests)} authentication test(s) ({skipped} skipped/duplicate).",
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
 # Include sub-routers into main router
 router.include_router(project_router)
 router.include_router(api_router)
@@ -2602,3 +2788,4 @@ router.include_router(finding_router)
 router.include_router(matrix_router)
 router.include_router(policy_router)
 router.include_router(property_router)
+router.include_router(auth_security_router)
