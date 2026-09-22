@@ -48,6 +48,7 @@ interface FindingItem {
   victim_resource_instance_id: string | null;
   resource_id?: string | null;
   exposed_properties?: string[] | null;
+  authentication_mechanism?: string | null;
 }
 
 interface FindingDetailItem extends FindingItem {
@@ -239,6 +240,12 @@ export default function FindingsPage() {
             onChange={(e) => setTypeFilter(e.target.value)}
           >
             <option value="ALL">All Types</option>
+            <option value="AUTHENTICATION">All Authentication Findings</option>
+            <option value="AUTHENTICATION_BYPASS">Authentication Bypass</option>
+            <option value="INVALID_AUTH_ACCEPTED">Invalid Auth Accepted</option>
+            <option value="MALFORMED_AUTH_HANDLING">Malformed Auth Handling (5xx / Crash)</option>
+            <option value="EXPIRED_AUTH_ACCEPTED">Expired Auth Accepted</option>
+            <option value="AUTHENTICATION_INCONSISTENCY">Authentication Inconsistency</option>
             <option value="BOLA">BOLA (Resource Level)</option>
             <option value="BFLA">BFLA (Function Level)</option>
             <option value="PROPERTY_EXPOSURE">Property Exposure (Field Level)</option>
@@ -306,6 +313,12 @@ export default function FindingsPage() {
           {findings.map((finding) => {
             const isBFLA = finding.type.toUpperCase() === "BFLA";
             const isProp = finding.type.toUpperCase() === "PROPERTY_EXPOSURE";
+            const isAuth =
+              finding.type.startsWith("AUTH") ||
+              finding.type.includes("AUTH") ||
+              finding.type === "INVALID_AUTH_ACCEPTED" ||
+              finding.type === "MALFORMED_AUTH_HANDLING" ||
+              finding.type === "EXPIRED_AUTH_ACCEPTED";
             return (
               <Card
                 key={finding.id}
@@ -324,7 +337,9 @@ export default function FindingsPage() {
                       </span>
                       <span
                         className={`text-xs font-mono font-bold px-2 py-0.5 rounded border ${
-                          isProp
+                          isAuth
+                            ? "bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-cyan-500/20"
+                            : isProp
                             ? "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20"
                             : isBFLA
                             ? "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20"
@@ -333,6 +348,11 @@ export default function FindingsPage() {
                       >
                         {finding.type}
                       </span>
+                      {finding.authentication_mechanism && (
+                        <span className="text-xs font-mono px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 border border-cyan-500/20">
+                          Scheme: {finding.authentication_mechanism}
+                        </span>
+                      )}
                       <span className="text-xs font-semibold px-2 py-0.5 rounded bg-muted text-muted-foreground">
                         Confidence: {finding.confidence}
                       </span>
@@ -363,13 +383,15 @@ export default function FindingsPage() {
 
                     <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground pt-1">
                       <div>
-                        <span className="font-semibold text-foreground">Attacker:</span>{" "}
-                        {finding.attacker_identity_name || "Unknown"}
+                        <span className="font-semibold text-foreground">Attacker / Probe:</span>{" "}
+                        {isAuth && !finding.attacker_identity_name
+                          ? "Anonymous / Synthetic Probe"
+                          : finding.attacker_identity_name || "Unknown"}
                         {finding.attacker_role_name && (
                           <span className="ml-1 text-[11px] text-muted-foreground">({finding.attacker_role_name})</span>
                         )}
                       </div>
-                      {!isBFLA && finding.victim_resource_name && (
+                      {!isBFLA && !isAuth && finding.victim_resource_name && (
                         <div>
                           <span className="font-semibold text-foreground">Resource:</span>{" "}
                           {finding.victim_resource_name} {finding.victim_resource_instance_id ? `(${finding.victim_resource_instance_id})` : ""}
@@ -414,15 +436,29 @@ export default function FindingsPage() {
                   >
                     {selectedFinding.severity}
                   </span>
-                  <span
-                    className={`text-xs font-mono font-bold px-2 py-0.5 rounded border ${
-                      selectedFinding.type.toUpperCase() === "BFLA"
-                        ? "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20"
-                        : "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20"
-                    }`}
-                  >
-                    {selectedFinding.type}
-                  </span>
+                  {(() => {
+                    const isModalAuth =
+                      selectedFinding.type.startsWith("AUTH") ||
+                      selectedFinding.type.includes("AUTH") ||
+                      selectedFinding.type === "INVALID_AUTH_ACCEPTED" ||
+                      selectedFinding.type === "MALFORMED_AUTH_HANDLING" ||
+                      selectedFinding.type === "EXPIRED_AUTH_ACCEPTED";
+                    return (
+                      <span
+                        className={`text-xs font-mono font-bold px-2 py-0.5 rounded border ${
+                          isModalAuth
+                            ? "bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-cyan-500/20"
+                            : selectedFinding.type.toUpperCase() === "PROPERTY_EXPOSURE"
+                            ? "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20"
+                            : selectedFinding.type.toUpperCase() === "BFLA"
+                            ? "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20"
+                            : "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20"
+                        }`}
+                      >
+                        {selectedFinding.type}
+                      </span>
+                    );
+                  })()}
                   <span className="text-xs font-semibold px-2 py-0.5 rounded bg-muted">
                     Confidence: {selectedFinding.confidence}
                   </span>
@@ -452,6 +488,31 @@ export default function FindingsPage() {
                 }`}
               >
                 {replayResult}
+              </div>
+            )}
+
+            {/* Authentication Flaw Alert Box */}
+            {(selectedFinding.type.startsWith("AUTH") ||
+              selectedFinding.type.includes("AUTH") ||
+              selectedFinding.type === "INVALID_AUTH_ACCEPTED" ||
+              selectedFinding.type === "MALFORMED_AUTH_HANDLING" ||
+              selectedFinding.type === "EXPIRED_AUTH_ACCEPTED") && (
+              <div className="p-3.5 rounded-lg border border-cyan-500/30 bg-cyan-500/10 text-cyan-900 dark:text-cyan-200 text-xs space-y-1">
+                <div className="font-semibold flex items-center gap-2">
+                  <span>🔐</span>
+                  <span>Authentication Enforcement Failure: {selectedFinding.type}</span>
+                </div>
+                <p className="leading-relaxed">
+                  Endpoint{" "}
+                  <code className="font-mono font-bold bg-background/50 px-1 py-0.5 rounded">
+                    {selectedFinding.endpoint_method} {selectedFinding.endpoint_path}
+                  </code>{" "}
+                  did not properly enforce authentication controls
+                  {selectedFinding.authentication_mechanism
+                    ? ` for mechanism '${selectedFinding.authentication_mechanism}'`
+                    : ""}
+                  .
+                </p>
               </div>
             )}
 
@@ -515,7 +576,14 @@ export default function FindingsPage() {
               <div className="p-3 rounded-lg bg-card/60 border border-border space-y-1">
                 <span className="font-semibold text-muted-foreground uppercase">ATTACKER & ROLE</span>
                 <p className="text-foreground font-medium text-sm">
-                  {selectedFinding.attacker_identity_name || "Configured Test Identity"}
+                  {selectedFinding.attacker_identity_name ||
+                    (selectedFinding.type.startsWith("AUTH") ||
+                    selectedFinding.type.includes("AUTH") ||
+                    selectedFinding.type === "INVALID_AUTH_ACCEPTED" ||
+                    selectedFinding.type === "MALFORMED_AUTH_HANDLING" ||
+                    selectedFinding.type === "EXPIRED_AUTH_ACCEPTED"
+                      ? "Anonymous / Synthetic Probe"
+                      : "Configured Test Identity")}
                   {selectedFinding.attacker_role_name && (
                     <span className="text-xs text-muted-foreground ml-2">
                       (Role: {selectedFinding.attacker_role_name})
@@ -529,6 +597,13 @@ export default function FindingsPage() {
                   <span className="font-semibold text-muted-foreground uppercase">VICTIM RESOURCE</span>
                   <p className="text-foreground font-medium text-sm">
                     {selectedFinding.victim_resource_name || "Resource"} ({selectedFinding.victim_resource_instance_id})
+                  </p>
+                </div>
+              ) : selectedFinding.authentication_mechanism ? (
+                <div className="p-3 rounded-lg bg-card/60 border border-border space-y-1">
+                  <span className="font-semibold text-muted-foreground uppercase">AUTH SCHEME</span>
+                  <p className="text-cyan-600 dark:text-cyan-400 font-mono font-bold text-sm">
+                    {selectedFinding.authentication_mechanism}
                   </p>
                 </div>
               ) : (

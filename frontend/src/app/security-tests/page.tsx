@@ -106,7 +106,9 @@ export default function SecurityTestsPage() {
 
   // Create Test Modal state
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [selectedTestType, setSelectedTestType] = useState<"BOLA" | "BFLA" | "PROPERTY_EXPOSURE">("BOLA");
+  const [selectedTestType, setSelectedTestType] = useState<
+    "BOLA" | "BFLA" | "PROPERTY_EXPOSURE" | "AUTH_MISSING" | "AUTH_INVALID" | "AUTH_MALFORMED" | "AUTH_EXPIRED" | "AUTH_SCHEME"
+  >("BOLA");
   const [expectedAccess, setExpectedAccess] = useState<"DENY" | "ALLOW">("DENY");
   const [selectedEndpointId, setSelectedEndpointId] = useState<number | "">("");
   const [selectedAttackerId, setSelectedAttackerId] = useState<string>("");
@@ -115,6 +117,7 @@ export default function SecurityTestsPage() {
   const [victimInstanceId, setVictimInstanceId] = useState<string>("");
   const [attackerInstanceId, setAttackerInstanceId] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
+  const [generatingAuth, setGeneratingAuth] = useState(false);
 
   const activeProject = projects.find((p) => p.id === selectedProjectId);
   const isTargetAuthorized = activeProject?.authorization_status.toLowerCase() === "authorized";
@@ -240,9 +243,37 @@ export default function SecurityTestsPage() {
     }
   };
 
+  const handleGenerateAuthTests = async () => {
+    if (!selectedProjectId) return;
+    setGeneratingAuth(true);
+    try {
+      const res = await fetch(`/api/v1/projects/${selectedProjectId}/generate-auth-tests`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || "Failed to generate authentication tests");
+      }
+      const data = await res.json();
+      alert(
+        `Generated ${data.tests_created} authentication test(s) for ${data.endpoints_inspected} endpoints (${data.tests_skipped_existing} skipped as existing).`
+      );
+      setReloadKey((k) => k + 1);
+    } catch (err: unknown) {
+      alert("Generation failed: " + (err instanceof Error ? err.message : "Error"));
+    } finally {
+      setGeneratingAuth(false);
+    }
+  };
+
   const handleCreateTest = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedProjectId || !selectedEndpointId || !selectedAttackerId) {
+    if (!selectedProjectId || !selectedEndpointId) {
+      return;
+    }
+    const isAuth = selectedTestType.startsWith("AUTH_");
+    if (!isAuth && !selectedAttackerId) {
       return;
     }
     if (selectedTestType === "BOLA" && !victimInstanceId.trim()) {
@@ -252,7 +283,18 @@ export default function SecurityTestsPage() {
     setSubmitting(true);
     try {
       let payload;
-      if (selectedTestType === "BOLA") {
+      if (isAuth) {
+        payload = {
+          endpoint_id: Number(selectedEndpointId),
+          test_type: selectedTestType,
+          attacker_identity_id: selectedAttackerId || null,
+          expected_access: "DENY",
+          victim_identity_id: null,
+          victim_resource_id: null,
+          victim_resource_instance_id: null,
+          attacker_resource_instance_id: null,
+        };
+      } else if (selectedTestType === "BOLA") {
         payload = {
           endpoint_id: Number(selectedEndpointId),
           test_type: "BOLA",
@@ -353,11 +395,14 @@ export default function SecurityTestsPage() {
   const selectedAttackerObj = identities.find((i) => i.id === selectedAttackerId);
   const attackerHasAuth = !!selectedAttackerObj;
 
+  const isAuthTest = selectedTestType.startsWith("AUTH_");
   const canSubmit =
     selectedTestType === "BOLA"
       ? isTargetAuthorized && isSafeMethod && isEpLinked && attackerHasAuth && !!victimInstanceId.trim()
       : selectedTestType === "PROPERTY_EXPOSURE"
       ? isTargetAuthorized && isSafeMethod && attackerHasAuth && !!selectedEndpointId && (!!selectedResourceId || isEpLinked)
+      : isAuthTest
+      ? isTargetAuthorized && isSafeMethod && !!selectedEndpointId
       : isTargetAuthorized && isSafeMethod && attackerHasAuth && !!selectedEndpointId;
 
   // Filtered test list
@@ -382,7 +427,7 @@ export default function SecurityTestsPage() {
         <div>
           <h1 className="text-2xl font-bold">Controlled Security Testing Engine</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Execute controlled BOLA (Resource Level) and BFLA (Function Level) boundary tests against authorized targets.
+            Execute controlled BOLA, BFLA, Property Exposure, and Authentication security tests against authorized targets.
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -400,6 +445,13 @@ export default function SecurityTestsPage() {
               </select>
             </div>
           )}
+          <Button
+            variant="outline"
+            onClick={handleGenerateAuthTests}
+            disabled={!selectedProjectId || !isTargetAuthorized || generatingAuth}
+          >
+            {generatingAuth ? "Generating..." : "⚡ Generate Auth Tests"}
+          </Button>
           <Button
             onClick={() => setShowCreateModal(true)}
             disabled={!selectedProjectId || !isTargetAuthorized}
@@ -441,6 +493,11 @@ export default function SecurityTestsPage() {
               <option value="BOLA">BOLA (Resource Authorization)</option>
               <option value="BFLA">BFLA (Function-Level Authorization)</option>
               <option value="PROPERTY_EXPOSURE">Property Exposure (Field-Level)</option>
+              <option value="AUTH_MISSING">Missing Auth (AUTH_MISSING)</option>
+              <option value="AUTH_INVALID">Invalid Auth (AUTH_INVALID)</option>
+              <option value="AUTH_MALFORMED">Malformed Auth (AUTH_MALFORMED)</option>
+              <option value="AUTH_EXPIRED">Expired Auth (AUTH_EXPIRED)</option>
+              <option value="AUTH_SCHEME">Scheme Mismatch (AUTH_SCHEME)</option>
             </select>
           </div>
 
@@ -502,6 +559,7 @@ export default function SecurityTestsPage() {
             const isExecuting = executingTestId === test.id;
             const isBFLA = test.test_type.toUpperCase() === "BFLA";
             const isProp = test.test_type.toUpperCase() === "PROPERTY_EXPOSURE";
+            const isAuth = test.test_type.startsWith("AUTH_");
             return (
               <Card key={test.id} className="overflow-hidden border-border">
                 <div className="p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
@@ -509,7 +567,9 @@ export default function SecurityTestsPage() {
                     <div className="flex flex-wrap items-center gap-2">
                       <span
                         className={`text-xs font-mono font-bold px-2 py-0.5 rounded border ${
-                          isProp
+                          isAuth
+                            ? "bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-cyan-500/20"
+                            : isProp
                             ? "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20"
                             : isBFLA
                             ? "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20"
@@ -526,12 +586,22 @@ export default function SecurityTestsPage() {
                       {/* Result Badge */}
                       {test.latest_result === "CONFIRMED" && (
                         <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-red-500/20 text-red-700 dark:text-red-300 border border-red-500/30 animate-pulse">
-                          {isProp ? "CONFIRMED PROPERTY EXPOSURE" : isBFLA ? "CONFIRMED BFLA" : "CONFIRMED BOLA"}
+                          {isAuth
+                            ? `CONFIRMED AUTH FLAW (${test.test_type})`
+                            : isProp
+                            ? "CONFIRMED PROPERTY EXPOSURE"
+                            : isBFLA
+                            ? "CONFIRMED BFLA"
+                            : "CONFIRMED BOLA"}
                         </span>
                       )}
                       {test.latest_result === "PASS" && (
                         <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30">
-                          {isBFLA ? "PASSED (Boundary Enforced)" : "PASSED (Access Denied)"}
+                          {isAuth
+                            ? "PASSED (Auth Enforced)"
+                            : isBFLA
+                            ? "PASSED (Boundary Enforced)"
+                            : "PASSED (Access Denied)"}
                         </span>
                       )}
                       {test.latest_result === "INCONCLUSIVE" && (
@@ -554,13 +624,22 @@ export default function SecurityTestsPage() {
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-x-6 gap-y-1 text-xs text-muted-foreground">
                       <div>
                         <span className="font-semibold text-foreground">Attacker:</span>{" "}
-                        {test.attacker_identity_name || "Unknown"}
+                        {isAuth && !test.attacker_identity_name
+                          ? "Anonymous / Synthetic Probe"
+                          : test.attacker_identity_name || "Unknown"}
                         {test.attacker_role_name && (
                           <span className="ml-1 text-[11px] text-muted-foreground">({test.attacker_role_name})</span>
                         )}
                       </div>
                       <div>
-                        {isBFLA ? (
+                        {isAuth ? (
+                          <>
+                            <span className="font-semibold text-foreground">Auth Probe:</span>{" "}
+                            <span className="font-mono text-cyan-600 dark:text-cyan-400">
+                              {test.test_type.replace("AUTH_", "")}
+                            </span>
+                          </>
+                        ) : isBFLA ? (
                           <>
                             <span className="font-semibold text-foreground">Expected Access:</span>{" "}
                             <span
@@ -674,6 +753,17 @@ export default function SecurityTestsPage() {
               >
                 Property Exposure
               </button>
+              <button
+                type="button"
+                onClick={() => setSelectedTestType("AUTH_MISSING")}
+                className={`flex-1 py-1.5 px-2 rounded-md text-xs font-semibold transition-all ${
+                  selectedTestType.startsWith("AUTH_")
+                    ? "bg-card text-foreground shadow-xs"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                Authentication
+              </button>
             </div>
 
             <form onSubmit={handleCreateTest} className="space-y-4">
@@ -704,18 +794,50 @@ export default function SecurityTestsPage() {
                 )}
               </div>
 
+              {/* Authentication Test Subtype */}
+              {selectedTestType.startsWith("AUTH_") && (
+                <div>
+                  <label className="text-xs font-semibold text-muted-foreground uppercase">
+                    2. Authentication Test Type *
+                  </label>
+                  <select
+                    className="mt-1 w-full h-9 rounded-md border border-input bg-background px-3 py-1 text-sm shadow-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    value={selectedTestType}
+                    onChange={(e) =>
+                      setSelectedTestType(
+                        e.target.value as
+                          | "AUTH_MISSING"
+                          | "AUTH_INVALID"
+                          | "AUTH_MALFORMED"
+                          | "AUTH_EXPIRED"
+                          | "AUTH_SCHEME"
+                      )
+                    }
+                    required
+                  >
+                    <option value="AUTH_MISSING">AUTH_MISSING — Missing Authentication (drop credentials)</option>
+                    <option value="AUTH_INVALID">AUTH_INVALID — Invalid Authentication (forged / invalid token)</option>
+                    <option value="AUTH_MALFORMED">AUTH_MALFORMED — Malformed Authentication (corrupt syntax / test crash)</option>
+                    <option value="AUTH_EXPIRED">AUTH_EXPIRED — Expired Authentication (stale / expired session)</option>
+                    <option value="AUTH_SCHEME">AUTH_SCHEME — Scheme Mismatch (wrong auth scheme)</option>
+                  </select>
+                </div>
+              )}
+
               {/* Attacker Identity */}
               <div>
                 <label className="text-xs font-semibold text-muted-foreground uppercase">
-                  2. Attacker Identity & Role *
+                  {selectedTestType.startsWith("AUTH_") ? "3. Baseline Identity (Optional)" : "2. Attacker Identity & Role *"}
                 </label>
                 <select
                   className="mt-1 w-full h-9 rounded-md border border-input bg-background px-3 py-1 text-sm shadow-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                   value={selectedAttackerId}
                   onChange={(e) => setSelectedAttackerId(e.target.value)}
-                  required
+                  required={!selectedTestType.startsWith("AUTH_")}
                 >
-                  <option value="">-- Select attacker identity --</option>
+                  <option value="">
+                    {selectedTestType.startsWith("AUTH_") ? "-- Synthetic / Default Probe --" : "-- Select attacker identity --"}
+                  </option>
                   {identities.map((ident) => (
                     <option key={ident.id} value={ident.id}>
                       {ident.name} (Role: {ident.role_name || "Unassigned"}, {ident.auth_type})
@@ -723,7 +845,9 @@ export default function SecurityTestsPage() {
                   ))}
                 </select>
                 <p className="text-xs text-muted-foreground mt-1">
-                  {selectedTestType === "BFLA"
+                  {selectedTestType.startsWith("AUTH_")
+                    ? "Optional baseline identity used to mutate credentials for tampering tests. If omitted, engine uses synthetic probes."
+                    : selectedTestType === "BFLA"
                     ? "Evaluates whether this identity/role can access the endpoint according to the authorization matrix."
                     : "The test engine uses this identity's configured credentials to request the victim's resource."}
                 </p>
@@ -880,6 +1004,17 @@ export default function SecurityTestsPage() {
                       <div className="flex items-center gap-2">
                         <span>{selectedResourceId || isEpLinked ? "✅" : "❌"}</span>
                         <span>Domain resource configured</span>
+                      </div>
+                    </>
+                  ) : selectedTestType.startsWith("AUTH_") ? (
+                    <>
+                      <div className="flex items-center gap-2">
+                        <span>{selectedEndpointId ? "✅" : "❌"}</span>
+                        <span>Target endpoint selected</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span>✅</span>
+                        <span>Safe probe format (GET/HEAD safe headers)</span>
                       </div>
                     </>
                   ) : (
