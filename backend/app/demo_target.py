@@ -51,6 +51,10 @@ DEMO_ORDERS: Dict[str, Dict[str, Any]] = {
 }
 
 
+DEMO_EXPIRED_TOKENS = {"demo-token-expired"}
+DEMO_INVALID_TOKENS = {"demo-token-invalid"}
+
+
 def get_current_demo_user(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
     """Extract and validate bearer token for demo target."""
     if not authorization:
@@ -59,6 +63,9 @@ def get_current_demo_user(authorization: Optional[str] = Header(None)) -> Dict[s
     token = authorization.strip()
     if token.lower().startswith("bearer "):
         token = token[7:].strip()
+
+    if token in DEMO_EXPIRED_TOKENS:
+        raise HTTPException(status_code=401, detail="Token expired")
 
     user = DEMO_USERS.get(token)
     if not user:
@@ -265,4 +272,112 @@ def get_user_profile_filtered(
             "email": profile["email"],
         }
     return profile
+
+
+# ==============================================================================
+# STAGE 6: Authentication Security Test Endpoints
+# ==============================================================================
+
+@demo_target_router.get(
+    "/auth/protected",
+    summary="[TEST ONLY] Secure Protected Endpoint",
+    description="Correctly rejects missing, invalid, or expired tokens with HTTP 401.",
+)
+def demo_auth_protected(user: Dict[str, Any] = Depends(get_current_demo_user)):
+    """
+    Secure endpoint enforcing valid authentication:
+    Returns 401 if missing Authorization header, expired token, or invalid token.
+    Returns 200 OK with authenticated user context if valid.
+    """
+    return {
+        "status": "authenticated",
+        "message": "Access granted to secure protected resource",
+        "user_id": user["id"],
+        "user_name": user["name"],
+        "role": user["role"],
+    }
+
+
+@demo_target_router.get(
+    "/auth/vulnerable",
+    summary="[TEST ONLY] Authentication Bypass Vulnerable Endpoint",
+    description="Flawed endpoint: accepts requests with missing or invalid authentication and returns protected data.",
+)
+def demo_auth_vulnerable(authorization: Optional[str] = Header(None)):
+    """
+    Intentionally flawed endpoint:
+    Fails to validate authentication credentials and grants access unconditionally,
+    returning protected financial records and user details.
+    """
+    # Flawed: Does not enforce or validate token, returns protected records
+    return {
+        "status": "success",
+        "authenticated": False,
+        "access": "granted_unconditionally",
+        "data": {
+            "records": [
+                {"id": "rec_001", "name": "Confidential Security Audit Report", "amount": 1499.00},
+                {"id": "rec_002", "name": "Executive Compensation Data", "amount": 120000.00},
+            ],
+            "note": "Sensitive internal records leaked without authentication",
+        },
+    }
+
+
+@demo_target_router.get(
+    "/auth/soft-deny",
+    summary="[TEST ONLY] Application-Level Soft Denial Endpoint",
+    description="Returns HTTP 200 OK but body specifies authenticated: false and Unauthorized error.",
+)
+def demo_auth_soft_deny(authorization: Optional[str] = Header(None)):
+    """
+    Returns HTTP 200 OK with an application-level denial payload.
+    Used to test that ResponseAnalyzer correctly identifies this as a rejection (PASS)
+    rather than a false-positive bypass.
+    """
+    return {
+        "error": "Unauthorized",
+        "authenticated": False,
+        "message": "Authentication required to access this resource",
+        "code": 401,
+    }
+
+
+@demo_target_router.get(
+    "/auth/error",
+    summary="[TEST ONLY] Malformed Auth Crash Endpoint",
+    description="Simulates unhandled backend exception (HTTP 500) when malformed Authorization header is supplied.",
+)
+def demo_auth_error(authorization: Optional[str] = Header(None)):
+    """
+    Endpoint that crashes with HTTP 500 when malformed authentication is supplied.
+    If valid token is provided, returns 200.
+    If header is missing, returns 401.
+    If header is malformed (e.g. invalid scheme, garbage format, or missing Bearer prefix),
+    raises an unhandled 500 error.
+    """
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authentication required: Missing Authorization header")
+
+    # Malformed check: if not starting with "Bearer " or empty token or contains malformed keyword
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=500, detail="Internal Server Error: Unhandled header format parsing crash")
+
+    token = authorization[7:].strip()
+    if not token or token == "malformed" or " " in token or token == "Bearer":
+        raise HTTPException(status_code=500, detail="Internal Server Error: Unhandled token decoding crash on malformed input")
+
+    if token in DEMO_EXPIRED_TOKENS:
+        raise HTTPException(status_code=401, detail="Token expired")
+
+    user = DEMO_USERS.get(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    return {
+        "status": "authenticated",
+        "user_id": user["id"],
+        "user_name": user["name"],
+    }
+
 
