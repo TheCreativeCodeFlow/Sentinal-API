@@ -44,6 +44,11 @@ DENIAL_BODY_PATTERNS = [
     re.compile(r"not\s*allowed", re.IGNORECASE),
     re.compile(r"invalid\s*token", re.IGNORECASE),
     re.compile(r"insufficient\s*permissions", re.IGNORECASE),
+    re.compile(r"authentication\s*required", re.IGNORECASE),
+    re.compile(r"login\s*required", re.IGNORECASE),
+    re.compile(r"token\s*expired", re.IGNORECASE),
+    re.compile(r"token\s*invalid", re.IGNORECASE),
+    re.compile(r"unauthenticated", re.IGNORECASE),
 ]
 
 UUID_REGEX = re.compile(
@@ -318,20 +323,24 @@ class ResponseAnalyzer:
             denial_indicator = f"HTTP {status_code}"
         elif not is_empty:
             # Check if an HTTP 200 payload actually represents an application-level denial
-            # e.g., {"error": "Unauthorized", "message": "Access denied"}
-            text_to_check = ""
-            if isinstance(parsed_json, dict):
-                error_val = parsed_json.get("error") or parsed_json.get("message") or parsed_json.get("detail")
-                if error_val:
-                    text_to_check = str(error_val)
+            # e.g., {"error": "Unauthorized", "message": "Access denied", "authenticated": false}
+            if isinstance(parsed_json, dict) and (parsed_json.get("authenticated") is False or parsed_json.get("is_authenticated") is False):
+                is_auth_failure = True
+                denial_indicator = "JSON payload specifies authenticated: false"
             else:
-                text_to_check = body[:500]
+                text_to_check = ""
+                if isinstance(parsed_json, dict):
+                    for k in ("error", "message", "detail", "status", "msg"):
+                        if k in parsed_json:
+                            text_to_check += " " + str(parsed_json[k])
+                else:
+                    text_to_check = body[:1000]
 
-            for pat in DENIAL_BODY_PATTERNS:
-                if pat.search(text_to_check):
-                    is_auth_failure = True
-                    denial_indicator = f"Application-level denial message matching '{pat.pattern}'"
-                    break
+                for pat in DENIAL_BODY_PATTERNS:
+                    if pat.search(text_to_check):
+                        is_auth_failure = True
+                        denial_indicator = f"Application-level denial message matching '{pat.pattern}'"
+                        break
 
         return ResponseSignature(
             status_code=status_code,
@@ -535,8 +544,227 @@ class ResponseAnalyzer:
             [],
         )
 
+    @classmethod
+    def is_application_denial(
+        cls,
+        status_code: int,
+        parsed_json: Any = None,
+        raw_text: str = "",
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Detects application-level soft-denials where the HTTP status code might be 200 OK
+        or 204, but the payload explicitly signifies an authentication or authorization denial.
+        """
+        if status_code in (401, 403):
+            return True, f"HTTP {status_code}"
+
+        # JSON dictionary checks
+        if isinstance(parsed_json, dict):
+            if parsed_json.get("authenticated") is False or parsed_json.get("is_authenticated") is False:
+                return True, "JSON payload specifies authenticated: false"
+            if str(parsed_json.get("status", "")).lower() in ("unauthorized", "forbidden", "denied"):
+                return True, f"JSON payload status is '{parsed_json.get('status')}'"
+
+            for key in ("error", "message", "detail", "msg", "title"):
+                val = str(parsed_json.get(key, ""))
+                for pat in DENIAL_BODY_PATTERNS:
+                    if pat.search(val):
+                        return True, f"JSON field '{key}' matched denial pattern '{pat.pattern}'"
+
+        # Text / HTML checks
+        if raw_text:
+            text_sample = raw_text[:2000]
+            if "<html" in text_sample.lower():
+                if re.search(r"<title>[^<]*(login|sign in|unauthorized|access denied)", text_sample, re.IGNORECASE):
+                    return True, "HTML page title indicates login or unauthorized"
+                if re.search(r"<(?:form|input)[^>]*(login|password|username)", text_sample, re.IGNORECASE):
+                    return True, "HTML login form returned instead of protected API data"
+
+            for pat in DENIAL_BODY_PATTERNS:
+                if pat.search(text_sample):
+                    return True, f"Response text matched denial pattern '{pat.pattern}'"
+
+        return False, None
+
+    @classmethod
+    def contains_protected_data(
+        cls,
+        parsed_json: Any = None,
+        raw_text: str = "",
+    ) -> Tuple[bool, List[str]]:
+        """
+        Detects if response actually exposes protected entity records, user information,
+        or sensitive attributes despite ambiguous or non-standard status codes.
+        """
+        indicators: List[str] = []
+        if isinstance(parsed_json, dict):
+            # Check for data wrapping or direct entity fields
+            for k in ("data", "user", "profile", "order", "account", "records", "items", "resource"):
+                if k in parsed_json and parsed_json[k]:
+                    indicators.append(f"container field '{k}'")
+
+            # Check for direct identity/resource fields
+            for key in ("email", "username", "account_number", "ssn", "balance", "role", "permissions"):
+                if key in parsed_json and parsed_json[key] is not None:
+                    indicators.append(f"entity field '{key}'")
+
+            # Check if identifiers or sensitive properties exist
+            ident = cls.extract_identifiers(parsed_json)
+            if ident:
+                indicators.extend([f"id:{i}" for i in ident[:3]])
+            sens = cls.extract_sensitive_fields(parsed_json)
+            if sens:
+                indicators.extend([f"sensitive:{s}" for s in sens[:3]])
+
+        elif isinstance(parsed_json, list) and len(parsed_json) > 0:
+            indicators.append(f"record array with {len(parsed_json)} item(s)")
+            if isinstance(parsed_json[0], dict):
+                ident = cls.extract_identifiers(parsed_json[0])
+                if ident:
+                    indicators.extend([f"id:{i}" for i in ident[:2]])
+
+        return (len(indicators) > 0, indicators)
+
+    @classmethod
+    def evaluate_authentication_result(
+        cls,
+        test_type: str,
+        signature: ResponseSignature,
+        expected_denial_status: int = 401,
+        parsed_json: Any = None,
+        raw_text: str = "",
+    ) -> Tuple[str, str, Optional[str], Optional[str]]:
+        """
+        Evaluates the security outcome of an authentication test.
+        Returns:
+            (result: PASS | CONFIRMED | INCONCLUSIVE,
+             reason: str,
+             finding_type: Optional[str],
+             error_category: Optional[str])
+        """
+        ttype = test_type.upper().strip()
+
+        # 1. Check for unhandled server errors (5xx)
+        if signature.is_server_error or signature.status_code >= 500:
+            if ttype == "AUTH_MALFORMED":
+                return (
+                    "CONFIRMED",
+                    f"Target crashed with HTTP {signature.status_code} server error on malformed authentication input instead of returning a proper 4xx client rejection.",
+                    "MALFORMED_AUTH_HANDLING",
+                    None,
+                )
+            return (
+                "INCONCLUSIVE",
+                f"Target returned server error HTTP {signature.status_code}; authentication enforcement cannot be verified.",
+                None,
+                "server_error",
+            )
+
+        # 2. Check for soft-denials / application-level denials (e.g. 200 OK + {"error": "Unauthorized"})
+        is_denial, denial_desc = cls.is_application_denial(signature.status_code, parsed_json, raw_text)
+        has_protected_data, data_indicators = cls.contains_protected_data(parsed_json, raw_text)
+
+        if signature.status_code in (200, 204) and is_denial and not has_protected_data:
+            return (
+                "PASS",
+                f"Access was denied at application level ({denial_desc}) despite HTTP {signature.status_code}. No protected data was returned.",
+                None,
+                None,
+            )
+
+        # 3. Check for standard denials (401 Unauthorized, 403 Forbidden)
+        if signature.status_code in (401, 403):
+            return (
+                "PASS",
+                f"Authentication was properly enforced; request was rejected with HTTP {signature.status_code}.",
+                None,
+                None,
+            )
+
+        # 4. Check for HTTP 400 Bad Request (acceptable for malformed auth, scheme mismatch, or invalid auth)
+        if signature.status_code == 400:
+            if ttype in ("AUTH_MALFORMED", "AUTH_SCHEME", "AUTH_INVALID"):
+                return (
+                    "PASS",
+                    "Target rejected malformed or invalid authentication credential with HTTP 400 Bad Request.",
+                    None,
+                    None,
+                )
+            return (
+                "INCONCLUSIVE",
+                "Target returned HTTP 400 Bad Request; endpoint parameters or request format may be invalid.",
+                None,
+                "client_error",
+            )
+
+        # 5. Check for HTTP redirects to login/authentication (301, 302, 303, 307, 308)
+        if signature.status_code in (301, 302, 303, 307, 308):
+            return (
+                "PASS",
+                f"Target returned HTTP {signature.status_code} redirect, directing unauthenticated client to login or authentication gateway.",
+                None,
+                None,
+            )
+
+        # 6. Check for successful responses (HTTP 200, 201, 204)
+        if signature.status_code in (200, 201, 204):
+            data_suffix = f" (data indicators detected: {', '.join(data_indicators)})" if data_indicators else ""
+            if ttype == "AUTH_MISSING":
+                return (
+                    "CONFIRMED",
+                    f"Authentication bypass confirmed: protected endpoint accepted request without authentication headers and returned HTTP {signature.status_code} OK{data_suffix}.",
+                    "AUTHENTICATION_BYPASS",
+                    None,
+                )
+            elif ttype == "AUTH_INVALID":
+                return (
+                    "CONFIRMED",
+                    f"Invalid authentication accepted: protected endpoint accepted forged or invalid credentials and returned HTTP {signature.status_code} OK{data_suffix}.",
+                    "INVALID_AUTH_ACCEPTED",
+                    None,
+                )
+            elif ttype == "AUTH_MALFORMED":
+                return (
+                    "CONFIRMED",
+                    f"Malformed authentication accepted: protected endpoint accepted malformed authentication headers and returned HTTP {signature.status_code} OK{data_suffix}.",
+                    "MALFORMED_AUTH_HANDLING",
+                    None,
+                )
+            elif ttype == "AUTH_EXPIRED":
+                return (
+                    "CONFIRMED",
+                    f"Expired credentials accepted: protected endpoint accepted expired authentication credentials and returned HTTP {signature.status_code} OK{data_suffix}.",
+                    "EXPIRED_AUTH_ACCEPTED",
+                    None,
+                )
+            elif ttype == "AUTH_SCHEME":
+                return (
+                    "CONFIRMED",
+                    f"Authentication inconsistency: protected endpoint accepted incorrect authentication scheme and returned HTTP {signature.status_code} OK{data_suffix}.",
+                    "AUTHENTICATION_INCONSISTENCY",
+                    None,
+                )
+            else:
+                return (
+                    "CONFIRMED",
+                    f"Protected endpoint granted access with HTTP {signature.status_code} OK{data_suffix}.",
+                    "AUTHENTICATION_BYPASS",
+                    None,
+                )
+
+        # 7. Fallback for other status codes (e.g. 404, 405, 422)
+        return (
+            "INCONCLUSIVE",
+            f"Target returned unexpected HTTP status code {signature.status_code}.",
+            None,
+            "unexpected_status",
+        )
+
 
 extract_property_paths = ResponseAnalyzer.extract_property_paths
 classify_property_heuristic = ResponseAnalyzer.classify_property_heuristic
 discover_candidate_sensitive_properties = ResponseAnalyzer.discover_candidate_sensitive_properties
+evaluate_authentication_result = ResponseAnalyzer.evaluate_authentication_result
+is_application_denial = ResponseAnalyzer.is_application_denial
+contains_protected_data = ResponseAnalyzer.contains_protected_data
 
