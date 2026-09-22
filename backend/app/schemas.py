@@ -304,7 +304,7 @@ class AuthorizationModelView(BaseModel):
 class SecurityTestCreate(BaseModel):
     endpoint_id: int
     test_type: str = Field("BOLA", min_length=1, max_length=50)
-    attacker_identity_id: str
+    attacker_identity_id: Optional[str] = None
     victim_identity_id: Optional[str] = None
     victim_resource_id: Optional[str] = None
     victim_resource_instance_id: Optional[str] = Field(None, max_length=255)
@@ -320,7 +320,7 @@ class SecurityTestInDB(BaseModel):
     endpoint_method: Optional[str] = None
     endpoint_path: Optional[str] = None
     test_type: str
-    attacker_identity_id: str
+    attacker_identity_id: Optional[str] = None
     attacker_identity_name: Optional[str] = None
     attacker_role_name: Optional[str] = None
     victim_identity_id: Optional[str] = None
@@ -397,6 +397,7 @@ class FindingInDB(BaseModel):
     endpoint_path: Optional[str] = None
     resource_id: Optional[str] = None
     exposed_properties: Optional[List[str]] = None
+    authentication_mechanism: Optional[str] = None
     attacker_identity_name: Optional[str] = None
     attacker_role_name: Optional[str] = None
     victim_resource_name: Optional[str] = None
@@ -613,3 +614,46 @@ class PropertyDiscoveryRequest(BaseModel):
 class PropertyDiscoveryResponse(BaseModel):
     discovered_properties: List[CandidateProperty] = []
     total_discovered: int = 0
+
+
+# ==============================================================================
+# STAGE 6: Authentication Security Schemas
+# ==============================================================================
+
+class AuthenticationPolicyBase(BaseModel):
+    authentication_required: bool = True
+    authentication_scheme: str = Field("bearer_token", max_length=50)  # bearer_token, api_key, basic_auth, cookie_session, none
+    expected_denial_status: int = Field(401, ge=100, le=599)  # 401 or 403
+    notes: Optional[str] = Field(None, max_length=1000)
+
+
+class AuthenticationPolicyCreate(AuthenticationPolicyBase):
+    project_id: int
+    endpoint_id: int
+
+
+class AuthenticationPolicyUpdate(BaseModel):
+    authentication_required: Optional[bool] = None
+    authentication_scheme: Optional[str] = Field(None, max_length=50)
+    expected_denial_status: Optional[int] = Field(None, ge=100, le=599)
+    notes: Optional[str] = Field(None, max_length=1000)
+
+
+class AuthenticationPolicyInDB(AuthenticationPolicyBase):
+    id: str
+    project_id: int
+    endpoint_id: int
+    endpoint_method: Optional[str] = None
+    endpoint_path: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AuthTestGenerationResponse(BaseModel):
+    project_id: int
+    generated_count: int
+    skipped_count: int
+    test_ids: List[str] = []
+    message: str

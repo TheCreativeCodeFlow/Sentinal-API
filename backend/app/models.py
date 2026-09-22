@@ -43,6 +43,7 @@ class Project(Base):
     findings = relationship("Finding", back_populates="project", cascade="all, delete-orphan")
     endpoint_policies = relationship("EndpointAuthorizationPolicy", back_populates="project", cascade="all, delete-orphan")
     matrix_rules = relationship("AuthorizationMatrixRule", back_populates="project", cascade="all, delete-orphan")
+    auth_policies = relationship("AuthenticationPolicy", back_populates="project", cascade="all, delete-orphan")
 
 
 class API(Base):
@@ -84,6 +85,7 @@ class Endpoint(Base):
     resource = relationship("Resource", back_populates="endpoints")
     policy = relationship("EndpointAuthorizationPolicy", back_populates="endpoint", uselist=False, cascade="all, delete-orphan")
     matrix_rules = relationship("AuthorizationMatrixRule", back_populates="endpoint", cascade="all, delete-orphan")
+    auth_policy = relationship("AuthenticationPolicy", back_populates="endpoint", uselist=False, cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("ix_endpoints_api_id", "api_id"),
@@ -232,7 +234,7 @@ class SecurityTest(Base):
     project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
     endpoint_id = Column(Integer, ForeignKey("endpoints.id", ondelete="CASCADE"), nullable=False, index=True)
     test_type = Column(String(50), nullable=False, default="BOLA", index=True)
-    attacker_identity_id = Column(String(36), ForeignKey("identities.id", ondelete="CASCADE"), nullable=False, index=True)
+    attacker_identity_id = Column(String(36), ForeignKey("identities.id", ondelete="CASCADE"), nullable=True, index=True)
     victim_identity_id = Column(String(36), ForeignKey("identities.id", ondelete="SET NULL"), nullable=True, index=True)
     victim_resource_id = Column(String(36), ForeignKey("resources.id", ondelete="SET NULL"), nullable=True, index=True)
     victim_resource_instance_id = Column(String(255), nullable=True)
@@ -302,6 +304,7 @@ class Finding(Base):
     expected_authorization = Column(String(50), nullable=True)  # e.g., DENY, ALLOW
     actual_behavior = Column(Text, nullable=True)
     exposed_properties = Column(Text, nullable=True)  # JSON-encoded list of exposed property paths
+    authentication_mechanism = Column(String(50), nullable=True)  # bearer_token, api_key, basic_auth, cookie_session
     remediation = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(
@@ -459,4 +462,31 @@ class PropertyAuthorizationRule(Base):
 
     __table_args__ = (
         Index("ix_property_rule_prop_role", "resource_property_id", "role_id", unique=True),
+    )
+
+
+# ==============================================================================
+# STAGE 6: Authentication Security Models
+# ==============================================================================
+
+class AuthenticationPolicy(Base):
+    __tablename__ = "authentication_policies"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    endpoint_id = Column(Integer, ForeignKey("endpoints.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    authentication_required = Column(Boolean, default=True, nullable=False)
+    authentication_scheme = Column(String(50), default="bearer_token", nullable=False)  # bearer_token, api_key, basic_auth, cookie_session, none
+    expected_denial_status = Column(Integer, default=401, nullable=False)  # 401 or 403
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    project = relationship("Project", back_populates="auth_policies")
+    endpoint = relationship("Endpoint", back_populates="auth_policy")
+
+    __table_args__ = (
+        Index("ix_auth_policy_proj_scheme", "project_id", "authentication_scheme"),
     )
