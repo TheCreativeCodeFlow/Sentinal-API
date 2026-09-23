@@ -6,7 +6,7 @@ from sqlalchemy.ext.declarative import declarative_base
 def get_database_url():
     return os.getenv(
         "DATABASE_URL",
-        "postgresql://sentinel:sentinel@db:5432/sentinel",
+        "sqlite:///./sentinel.db",
     )
 
 
