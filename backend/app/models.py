@@ -46,6 +46,8 @@ class Project(Base):
     matrix_rules = relationship("AuthorizationMatrixRule", back_populates="project", cascade="all, delete-orphan")
     auth_policies = relationship("AuthenticationPolicy", back_populates="project", cascade="all, delete-orphan")
     workflows = relationship("Workflow", back_populates="project", cascade="all, delete-orphan")
+    attack_graphs = relationship("AttackGraph", back_populates="project", cascade="all, delete-orphan")
+    correlations = relationship("FindingCorrelation", back_populates="project", cascade="all, delete-orphan")
 
 
 class API(Base):
@@ -329,6 +331,7 @@ class Finding(Base):
     attacker_identity = relationship("Identity", foreign_keys=[attacker_identity_id])
     attacker_role = relationship("Role", foreign_keys=[attacker_role_id])
     resource = relationship("Resource", foreign_keys=[resource_id])
+    graph_nodes = relationship("AttackGraphNode", back_populates="finding")
 
     __table_args__ = (
         Index("ix_findings_project_severity", "project_id", "severity"),
@@ -788,4 +791,95 @@ class WorkflowAttackStep(Base):
 
     __table_args__ = (
         Index("ix_wf_attack_steps_scenario_pos", "scenario_id", "position"),
+    )
+
+
+# ==============================================================================
+# STAGE 8.1: Deterministic Finding Correlation & Attack Graph Models
+# ==============================================================================
+
+class AttackGraph(Base):
+    __tablename__ = "attack_graphs"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    status = Column(String(50), nullable=False, default="ACTIVE", index=True)  # ACTIVE, ARCHIVED
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    project = relationship("Project", back_populates="attack_graphs")
+    nodes = relationship("AttackGraphNode", back_populates="graph", cascade="all, delete-orphan")
+    edges = relationship("AttackGraphEdge", back_populates="graph", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("ix_attack_graphs_project_status", "project_id", "status"),
+    )
+
+
+class AttackGraphNode(Base):
+    __tablename__ = "attack_graph_nodes"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    graph_id = Column(String(36), ForeignKey("attack_graphs.id", ondelete="CASCADE"), nullable=False, index=True)
+    finding_id = Column(String(36), ForeignKey("findings.id", ondelete="SET NULL"), nullable=True, index=True)
+    node_type = Column(String(50), nullable=False, index=True)  # FINDING, IDENTITY, ROLE, ENDPOINT, RESOURCE, WORKFLOW, WORKFLOW_EXECUTION, PROPERTY, AUTHENTICATION
+    label = Column(String(255), nullable=False)
+    node_metadata = Column("metadata_json", JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    graph = relationship("AttackGraph", back_populates="nodes")
+    finding = relationship("Finding", back_populates="graph_nodes")
+    outgoing_edges = relationship("AttackGraphEdge", foreign_keys="AttackGraphEdge.source_node_id", cascade="all, delete-orphan")
+    incoming_edges = relationship("AttackGraphEdge", foreign_keys="AttackGraphEdge.target_node_id", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("ix_attack_graph_nodes_graph_type", "graph_id", "node_type"),
+    )
+
+
+class AttackGraphEdge(Base):
+    __tablename__ = "attack_graph_edges"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    graph_id = Column(String(36), ForeignKey("attack_graphs.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_node_id = Column(String(36), ForeignKey("attack_graph_nodes.id", ondelete="CASCADE"), nullable=False, index=True)
+    target_node_id = Column(String(36), ForeignKey("attack_graph_nodes.id", ondelete="CASCADE"), nullable=False, index=True)
+    relationship_type = Column(String(50), nullable=False, index=True)  # SAME_IDENTITY, SAME_ENDPOINT, etc.
+    confidence = Column(String(50), nullable=False, default="HIGH")  # HIGH, MEDIUM, LOW
+    reason = Column(Text, nullable=False)
+    edge_metadata = Column("metadata_json", JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    graph = relationship("AttackGraph", back_populates="edges")
+    source_node = relationship("AttackGraphNode", foreign_keys=[source_node_id], back_populates="outgoing_edges")
+    target_node = relationship("AttackGraphNode", foreign_keys=[target_node_id], back_populates="incoming_edges")
+
+    __table_args__ = (
+        Index("ix_attack_graph_edges_graph_rel", "graph_id", "relationship_type"),
+        Index("ix_attack_graph_edges_src_tgt", "graph_id", "source_node_id", "target_node_id", "relationship_type", unique=True),
+    )
+
+
+class FindingCorrelation(Base):
+    __tablename__ = "finding_correlations"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    finding_a_id = Column(String(36), ForeignKey("findings.id", ondelete="CASCADE"), nullable=False, index=True)
+    finding_b_id = Column(String(36), ForeignKey("findings.id", ondelete="CASCADE"), nullable=False, index=True)
+    relationship_type = Column(String(50), nullable=False, index=True)
+    confidence = Column(String(50), nullable=False, default="HIGH")  # HIGH, MEDIUM, LOW
+    reason = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    project = relationship("Project", back_populates="correlations")
+    finding_a = relationship("Finding", foreign_keys=[finding_a_id])
+    finding_b = relationship("Finding", foreign_keys=[finding_b_id])
+
+    __table_args__ = (
+        Index("ix_finding_correlations_pair_rel", "project_id", "finding_a_id", "finding_b_id", "relationship_type", unique=True),
     )

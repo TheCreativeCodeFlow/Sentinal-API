@@ -15,6 +15,7 @@ const menuItems = [
   { href: "/property-security", label: "Property Security", key: "7c" },
   { href: "/authentication-security", label: "Auth Security", key: "7d" },
   { href: "/workflows", label: "Workflows", key: "7e" },
+  { href: "/attack-graph", label: "Attack Graph", key: "7f" },
   { href: "/security-tests", label: "Security Tests", key: "8" },
   { href: "/findings", label: "Findings", key: "9" },
   { href: "/attack-surface", label: "Attack Surface", key: "10" },

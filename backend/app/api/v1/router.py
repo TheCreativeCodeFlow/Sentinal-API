@@ -30,6 +30,10 @@ from app.models import (
     WorkflowStepExecution,
     WorkflowAttackScenario,
     WorkflowAttackStep,
+    AttackGraph,
+    AttackGraphNode,
+    AttackGraphEdge,
+    FindingCorrelation,
 )
 from app.schemas import (
     ProjectCreate,
@@ -127,8 +131,18 @@ from app.schemas import (
     WorkflowAttackScenarioDetailInDB,
     WorkflowAttackScenarioGenerateRequest,
     WorkflowAttackScenarioGenerateResult,
+    AttackGraphNodeBase,
+    AttackGraphNodeInDB,
+    AttackGraphEdgeBase,
+    AttackGraphEdgeInDB,
+    AttackGraphBase,
+    AttackGraphInDB,
+    AttackGraphDetailInDB,
+    FindingCorrelationInDB,
+    CorrelationRunResponse,
 )
 from app.services.security_engine.redactor import SENSITIVE_HEADER_NAMES
+from app.services.security_engine.correlation_engine import CorrelationEngine
 
 
 
@@ -4120,6 +4134,218 @@ async def replay_workflow_attack_scenario(
     return format_workflow_execution_detail(execution, db)
 
 
+# --- Stage 8.1 Correlation & Attack Graph Routes ---
+
+correlation_router = APIRouter(tags=["Correlation & Attack Graph"])
+
+
+def format_correlation_response(corr: FindingCorrelation) -> FindingCorrelationInDB:
+    return FindingCorrelationInDB(
+        id=corr.id,
+        project_id=corr.project_id,
+        finding_a_id=corr.finding_a_id,
+        finding_b_id=corr.finding_b_id,
+        relationship_type=corr.relationship_type,
+        confidence=corr.confidence,
+        reason=corr.reason,
+        created_at=corr.created_at,
+        finding_a_title=corr.finding_a.title if corr.finding_a else None,
+        finding_b_title=corr.finding_b.title if corr.finding_b else None,
+        finding_a_type=corr.finding_a.type if corr.finding_a else None,
+        finding_b_type=corr.finding_b.type if corr.finding_b else None,
+        finding_a_severity=corr.finding_a.severity if corr.finding_a else None,
+        finding_b_severity=corr.finding_b.severity if corr.finding_b else None,
+    )
+
+
+def format_attack_graph_node_response(node: AttackGraphNode) -> AttackGraphNodeInDB:
+    return AttackGraphNodeInDB(
+        id=node.id,
+        graph_id=node.graph_id,
+        finding_id=node.finding_id,
+        node_type=node.node_type,
+        label=node.label,
+        metadata=node.node_metadata,
+        created_at=node.created_at,
+        finding_severity=node.finding.severity if node.finding else None,
+        finding_type=node.finding.type if node.finding else None,
+    )
+
+
+def format_attack_graph_edge_response(edge: AttackGraphEdge) -> AttackGraphEdgeInDB:
+    return AttackGraphEdgeInDB(
+        id=edge.id,
+        graph_id=edge.graph_id,
+        source_node_id=edge.source_node_id,
+        target_node_id=edge.target_node_id,
+        relationship_type=edge.relationship_type,
+        confidence=edge.confidence,
+        reason=edge.reason,
+        metadata=edge.edge_metadata,
+        created_at=edge.created_at,
+        source_label=edge.source_node.label if edge.source_node else None,
+        target_label=edge.target_node.label if edge.target_node else None,
+    )
+
+
+def format_attack_graph_response(graph: AttackGraph) -> AttackGraphInDB:
+    return AttackGraphInDB(
+        id=graph.id,
+        project_id=graph.project_id,
+        name=graph.name,
+        description=graph.description,
+        status=graph.status,
+        created_at=graph.created_at,
+        updated_at=graph.updated_at,
+        node_count=len(graph.nodes) if graph.nodes else 0,
+        edge_count=len(graph.edges) if graph.edges else 0,
+    )
+
+
+def format_attack_graph_detail_response(graph: AttackGraph) -> AttackGraphDetailInDB:
+    return AttackGraphDetailInDB(
+        id=graph.id,
+        project_id=graph.project_id,
+        name=graph.name,
+        description=graph.description,
+        status=graph.status,
+        created_at=graph.created_at,
+        updated_at=graph.updated_at,
+        node_count=len(graph.nodes) if graph.nodes else 0,
+        edge_count=len(graph.edges) if graph.edges else 0,
+        nodes=[format_attack_graph_node_response(n) for n in graph.nodes],
+        edges=[format_attack_graph_edge_response(e) for e in graph.edges],
+    )
+
+
+@correlation_router.post(
+    "/projects/{project_id}/correlation/run",
+    response_model=CorrelationRunResponse,
+)
+def run_project_correlation(
+    project_id: int,
+    db: Session = Depends(get_db),
+):
+    """Run deterministic correlation and construct the attack graph."""
+    project = get_project_or_404(project_id, db)
+    engine = CorrelationEngine(db=db)
+    result = engine.run_correlation(project_id=project.id)
+    return CorrelationRunResponse(
+        project_id=result["project_id"],
+        confirmed_findings_count=result["confirmed_findings_count"],
+        correlations_count=result["correlations_count"],
+        new_correlations_count=result["new_correlations_count"],
+        graph_id=result["graph_id"],
+        node_count=result["node_count"],
+        edge_count=result["edge_count"],
+        correlations=[format_correlation_response(c) for c in result["correlations"]],
+        graph=format_attack_graph_response(result["graph"]),
+    )
+
+
+@correlation_router.get(
+    "/projects/{project_id}/correlations",
+    response_model=List[FindingCorrelationInDB],
+)
+def list_project_correlations(
+    project_id: int,
+    db: Session = Depends(get_db),
+):
+    """List deterministic correlations between findings in a project."""
+    project = get_project_or_404(project_id, db)
+    correlations = (
+        db.query(FindingCorrelation)
+        .filter(FindingCorrelation.project_id == project.id)
+        .order_by(FindingCorrelation.created_at.asc())
+        .all()
+    )
+    return [format_correlation_response(c) for c in correlations]
+
+
+@correlation_router.get(
+    "/projects/{project_id}/attack-graphs",
+    response_model=List[AttackGraphInDB],
+)
+def list_project_attack_graphs(
+    project_id: int,
+    db: Session = Depends(get_db),
+):
+    """List attack graphs for a project."""
+    project = get_project_or_404(project_id, db)
+    graphs = (
+        db.query(AttackGraph)
+        .filter(AttackGraph.project_id == project.id)
+        .order_by(AttackGraph.created_at.desc())
+        .all()
+    )
+    return [format_attack_graph_response(g) for g in graphs]
+
+
+@correlation_router.get(
+    "/attack-graphs/{graph_id}",
+    response_model=AttackGraphDetailInDB,
+)
+def get_attack_graph(
+    graph_id: str,
+    db: Session = Depends(get_db),
+):
+    """Get attack graph details with full nodes and edges."""
+    graph = db.query(AttackGraph).filter(AttackGraph.id == graph_id).first()
+    if not graph:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Attack graph {graph_id} not found",
+        )
+    return format_attack_graph_detail_response(graph)
+
+
+@correlation_router.get(
+    "/attack-graphs/{graph_id}/nodes",
+    response_model=List[AttackGraphNodeInDB],
+)
+def get_attack_graph_nodes(
+    graph_id: str,
+    db: Session = Depends(get_db),
+):
+    """Get all nodes in an attack graph."""
+    graph = db.query(AttackGraph).filter(AttackGraph.id == graph_id).first()
+    if not graph:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Attack graph {graph_id} not found",
+        )
+    nodes = (
+        db.query(AttackGraphNode)
+        .filter(AttackGraphNode.graph_id == graph_id)
+        .order_by(AttackGraphNode.created_at.asc())
+        .all()
+    )
+    return [format_attack_graph_node_response(n) for n in nodes]
+
+
+@correlation_router.get(
+    "/attack-graphs/{graph_id}/edges",
+    response_model=List[AttackGraphEdgeInDB],
+)
+def get_attack_graph_edges(
+    graph_id: str,
+    db: Session = Depends(get_db),
+):
+    """Get all edges in an attack graph."""
+    graph = db.query(AttackGraph).filter(AttackGraph.id == graph_id).first()
+    if not graph:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Attack graph {graph_id} not found",
+        )
+    edges = (
+        db.query(AttackGraphEdge)
+        .filter(AttackGraphEdge.graph_id == graph_id)
+        .order_by(AttackGraphEdge.created_at.asc())
+        .all()
+    )
+    return [format_attack_graph_edge_response(e) for e in edges]
+
 
 # Include sub-routers into main router
 router.include_router(project_router)
@@ -4138,3 +4364,4 @@ router.include_router(policy_router)
 router.include_router(property_router)
 router.include_router(auth_security_router)
 router.include_router(workflow_router)
+router.include_router(correlation_router)

@@ -939,3 +939,96 @@ class WorkflowAttackScenarioGenerateResult(BaseModel):
     generated_count: int
     existing_count: int
     scenarios: List[WorkflowAttackScenarioInDB] = []
+
+
+# ==============================================================================
+# STAGE 8.1: Attack Graph & Finding Correlation Schemas
+# ==============================================================================
+
+class AttackGraphNodeBase(BaseModel):
+    graph_id: str
+    node_type: str
+    label: str
+    finding_id: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class AttackGraphNodeInDB(AttackGraphNodeBase):
+    id: str
+    created_at: datetime
+    finding_severity: Optional[str] = None
+    finding_type: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AttackGraphEdgeBase(BaseModel):
+    graph_id: str
+    source_node_id: str
+    target_node_id: str
+    relationship_type: str
+    confidence: str = "HIGH"
+    reason: str
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class AttackGraphEdgeInDB(AttackGraphEdgeBase):
+    id: str
+    created_at: datetime
+    source_label: Optional[str] = None
+    target_label: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AttackGraphBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = Field(None, max_length=2000)
+    status: str = Field("ACTIVE", max_length=50)
+
+
+class AttackGraphInDB(AttackGraphBase):
+    id: str
+    project_id: int
+    created_at: datetime
+    updated_at: datetime
+    node_count: Optional[int] = 0
+    edge_count: Optional[int] = 0
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AttackGraphDetailInDB(AttackGraphInDB):
+    nodes: List[AttackGraphNodeInDB] = []
+    edges: List[AttackGraphEdgeInDB] = []
+
+
+class FindingCorrelationInDB(BaseModel):
+    id: str
+    project_id: int
+    finding_a_id: str
+    finding_b_id: str
+    relationship_type: str
+    confidence: str
+    reason: str
+    created_at: datetime
+    finding_a_title: Optional[str] = None
+    finding_b_title: Optional[str] = None
+    finding_a_type: Optional[str] = None
+    finding_b_type: Optional[str] = None
+    finding_a_severity: Optional[str] = None
+    finding_b_severity: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CorrelationRunResponse(BaseModel):
+    project_id: int
+    confirmed_findings_count: int
+    correlations_count: int
+    new_correlations_count: int
+    graph_id: str
+    node_count: int
+    edge_count: int
+    correlations: List[FindingCorrelationInDB] = []
+    graph: Optional[AttackGraphInDB] = None
