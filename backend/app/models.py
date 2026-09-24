@@ -9,6 +9,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Table,
+    JSON,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -44,6 +45,7 @@ class Project(Base):
     endpoint_policies = relationship("EndpointAuthorizationPolicy", back_populates="project", cascade="all, delete-orphan")
     matrix_rules = relationship("AuthorizationMatrixRule", back_populates="project", cascade="all, delete-orphan")
     auth_policies = relationship("AuthenticationPolicy", back_populates="project", cascade="all, delete-orphan")
+    workflows = relationship("Workflow", back_populates="project", cascade="all, delete-orphan")
 
 
 class API(Base):
@@ -489,4 +491,130 @@ class AuthenticationPolicy(Base):
 
     __table_args__ = (
         Index("ix_auth_policy_proj_scheme", "project_id", "authentication_scheme"),
+    )
+
+
+# ==============================================================================
+# STAGE 7.1: Stateful Workflow & Business Logic Security Models
+# ==============================================================================
+
+class Workflow(Base):
+    __tablename__ = "workflows"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(200), nullable=False, index=True)
+    description = Column(Text, nullable=True)
+    status = Column(String(50), nullable=False, default="DRAFT", index=True)  # DRAFT, ACTIVE, DISABLED
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    project = relationship("Project", back_populates="workflows")
+    steps = relationship(
+        "WorkflowStep",
+        back_populates="workflow",
+        cascade="all, delete-orphan",
+        order_by="WorkflowStep.step_order",
+    )
+    states = relationship(
+        "WorkflowState",
+        back_populates="workflow",
+        cascade="all, delete-orphan",
+    )
+    transitions = relationship(
+        "WorkflowTransition",
+        back_populates="workflow",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        Index("ix_workflows_project_name", "project_id", "name", unique=True),
+    )
+
+
+class WorkflowStep(Base):
+    __tablename__ = "workflow_steps"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    workflow_id = Column(String(36), ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False, index=True)
+    step_order = Column(Integer, nullable=False)
+    endpoint_id = Column(Integer, ForeignKey("endpoints.id", ondelete="CASCADE"), nullable=False, index=True)
+    identity_id = Column(String(36), ForeignKey("identities.id", ondelete="SET NULL"), nullable=True, index=True)
+    http_method = Column(String(10), nullable=False, default="GET")  # GET / HEAD only
+    name = Column(String(200), nullable=False)
+    description = Column(Text, nullable=True)
+    request_template = Column(JSON, nullable=True)
+    expected_status_codes = Column(JSON, nullable=False, default=list)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    workflow = relationship("Workflow", back_populates="steps")
+    endpoint = relationship("Endpoint")
+    identity = relationship("Identity")
+    transitions = relationship("WorkflowTransition", back_populates="step")
+
+    __table_args__ = (
+        Index("ix_workflow_steps_wf_order", "workflow_id", "step_order", unique=True),
+    )
+
+
+class WorkflowState(Base):
+    __tablename__ = "workflow_states"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    workflow_id = Column(String(36), ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(100), nullable=False)
+    description = Column(Text, nullable=True)
+    is_initial = Column(Boolean, default=False, nullable=False)
+    is_terminal = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    workflow = relationship("Workflow", back_populates="states")
+    outgoing_transitions = relationship(
+        "WorkflowTransition",
+        foreign_keys="[WorkflowTransition.from_state_id]",
+        back_populates="from_state",
+        cascade="all, delete-orphan",
+    )
+    incoming_transitions = relationship(
+        "WorkflowTransition",
+        foreign_keys="[WorkflowTransition.to_state_id]",
+        back_populates="to_state",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        Index("ix_workflow_states_wf_name", "workflow_id", "name", unique=True),
+    )
+
+
+class WorkflowTransition(Base):
+    __tablename__ = "workflow_transitions"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    workflow_id = Column(String(36), ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False, index=True)
+    from_state_id = Column(String(36), ForeignKey("workflow_states.id", ondelete="CASCADE"), nullable=False, index=True)
+    to_state_id = Column(String(36), ForeignKey("workflow_states.id", ondelete="CASCADE"), nullable=False, index=True)
+    step_id = Column(String(36), ForeignKey("workflow_steps.id", ondelete="SET NULL"), nullable=True, index=True)
+    expected_behavior = Column(String(20), nullable=False, default="ALLOW")  # ALLOW, DENY
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    workflow = relationship("Workflow", back_populates="transitions")
+    from_state = relationship("WorkflowState", foreign_keys=[from_state_id], back_populates="outgoing_transitions")
+    to_state = relationship("WorkflowState", foreign_keys=[to_state_id], back_populates="incoming_transitions")
+    step = relationship("WorkflowStep", back_populates="transitions")
+
+    __table_args__ = (
+        Index("ix_workflow_transitions_unique", "workflow_id", "from_state_id", "to_state_id", "step_id", unique=True),
     )

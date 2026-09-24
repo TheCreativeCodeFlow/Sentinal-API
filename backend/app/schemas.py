@@ -657,3 +657,144 @@ class AuthTestGenerationResponse(BaseModel):
     skipped_count: int
     test_ids: List[str] = []
     message: str
+
+
+# ==============================================================================
+# STAGE 7.1: Stateful Workflow & Business Logic Security Schemas
+# ==============================================================================
+
+class WorkflowBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = Field(None, max_length=2000)
+    status: str = Field("DRAFT", description="DRAFT, ACTIVE, DISABLED")
+
+
+class WorkflowCreate(WorkflowBase):
+    pass
+
+
+class WorkflowUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[str] = Field(None, max_length=2000)
+    status: Optional[str] = Field(None, description="DRAFT, ACTIVE, DISABLED")
+
+
+class WorkflowStepBase(BaseModel):
+    step_order: int = Field(..., ge=1)
+    endpoint_id: int
+    identity_id: Optional[str] = None
+    http_method: str = Field("GET", max_length=10)
+    name: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = Field(None, max_length=2000)
+    request_template: Optional[Dict[str, Any]] = None
+    expected_status_codes: List[int] = Field(default_factory=lambda: [200])
+
+
+class WorkflowStepCreate(WorkflowStepBase):
+    pass
+
+
+class WorkflowStepUpdate(BaseModel):
+    step_order: Optional[int] = Field(None, ge=1)
+    endpoint_id: Optional[int] = None
+    identity_id: Optional[str] = None
+    http_method: Optional[str] = Field(None, max_length=10)
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[str] = Field(None, max_length=2000)
+    request_template: Optional[Dict[str, Any]] = None
+    expected_status_codes: Optional[List[int]] = None
+
+
+class WorkflowStepInDB(WorkflowStepBase):
+    id: str
+    workflow_id: str
+    endpoint_path: Optional[str] = None
+    endpoint_method: Optional[str] = None
+    identity_name: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class WorkflowStateBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=2000)
+    is_initial: bool = False
+    is_terminal: bool = False
+
+
+class WorkflowStateCreate(WorkflowStateBase):
+    pass
+
+
+class WorkflowStateUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=2000)
+    is_initial: Optional[bool] = None
+    is_terminal: Optional[bool] = None
+
+
+class WorkflowStateInDB(WorkflowStateBase):
+    id: str
+    workflow_id: str
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class WorkflowTransitionBase(BaseModel):
+    from_state_id: str
+    to_state_id: str
+    step_id: Optional[str] = None
+    expected_behavior: str = Field("ALLOW", description="ALLOW, DENY")
+    description: Optional[str] = Field(None, max_length=2000)
+
+
+class WorkflowTransitionCreate(WorkflowTransitionBase):
+    pass
+
+
+class WorkflowTransitionUpdate(BaseModel):
+    from_state_id: Optional[str] = None
+    to_state_id: Optional[str] = None
+    step_id: Optional[str] = None
+    expected_behavior: Optional[str] = Field(None, description="ALLOW, DENY")
+    description: Optional[str] = Field(None, max_length=2000)
+
+
+class WorkflowTransitionInDB(WorkflowTransitionBase):
+    id: str
+    workflow_id: str
+    from_state_name: Optional[str] = None
+    to_state_name: Optional[str] = None
+    step_name: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class WorkflowInDB(WorkflowBase):
+    id: str
+    project_id: int
+    step_count: int = 0
+    state_count: int = 0
+    transition_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class WorkflowDetailInDB(WorkflowBase):
+    id: str
+    project_id: int
+    steps: List[WorkflowStepInDB] = []
+    states: List[WorkflowStateInDB] = []
+    transitions: List[WorkflowTransitionInDB] = []
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)

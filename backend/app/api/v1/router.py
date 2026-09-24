@@ -22,6 +22,10 @@ from app.models import (
     ResourceProperty,
     PropertyAuthorizationRule,
     AuthenticationPolicy,
+    Workflow,
+    WorkflowStep,
+    WorkflowState,
+    WorkflowTransition,
 )
 from app.schemas import (
     ProjectCreate,
@@ -94,7 +98,22 @@ from app.schemas import (
     AuthenticationPolicyUpdate,
     AuthenticationPolicyInDB,
     AuthTestGenerationResponse,
+    WorkflowCreate,
+    WorkflowUpdate,
+    WorkflowInDB,
+    WorkflowDetailInDB,
+    WorkflowStepCreate,
+    WorkflowStepUpdate,
+    WorkflowStepInDB,
+    WorkflowStateCreate,
+    WorkflowStateUpdate,
+    WorkflowStateInDB,
+    WorkflowTransitionCreate,
+    WorkflowTransitionUpdate,
+    WorkflowTransitionInDB,
 )
+from app.services.security_engine.redactor import SENSITIVE_HEADER_NAMES
+
 
 
 def get_project_or_404(project_id: int, db: Session):
@@ -222,6 +241,110 @@ def get_finding_or_404(finding_id: str, db: Session) -> Finding:
             detail=f"Finding with id {finding_id} not found",
         )
     return finding
+
+
+def get_workflow_or_404(workflow_id: str, db: Session) -> Workflow:
+    """Helper to get workflow or raise 404."""
+    wf = db.query(Workflow).filter(Workflow.id == workflow_id).first()
+    if not wf:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow with id {workflow_id} not found",
+        )
+    return wf
+
+
+def get_workflow_step_or_404(step_id: str, db: Session) -> WorkflowStep:
+    """Helper to get workflow step or raise 404."""
+    step = db.query(WorkflowStep).filter(WorkflowStep.id == step_id).first()
+    if not step:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow step with id {step_id} not found",
+        )
+    return step
+
+
+def get_workflow_state_or_404(state_id: str, db: Session) -> WorkflowState:
+    """Helper to get workflow state or raise 404."""
+    st = db.query(WorkflowState).filter(WorkflowState.id == state_id).first()
+    if not st:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow state with id {state_id} not found",
+        )
+    return st
+
+
+def get_workflow_transition_or_404(transition_id: str, db: Session) -> WorkflowTransition:
+    """Helper to get workflow transition or raise 404."""
+    tr = db.query(WorkflowTransition).filter(WorkflowTransition.id == transition_id).first()
+    if not tr:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow transition with id {transition_id} not found",
+        )
+    return tr
+
+
+SENSITIVE_KEY_PATTERNS = {
+    "password", "secret", "token", "api_key", "apikey", "access_token",
+    "refresh_token", "private_key", "authorization", "auth_token", "session_id", "cookie",
+}
+
+
+def validate_request_template(template: Optional[dict]) -> None:
+    """
+    Validate that request_template does not contain raw sensitive secrets.
+    Placeholders like {{...}} or [REDACTED] are allowed.
+    """
+    if not template or not isinstance(template, dict):
+        return
+
+    def check_item(key: str, val: Any):
+        lower_k = str(key).lower()
+        if isinstance(val, str):
+            val_trimmed = val.strip()
+            # If the string contains Bearer
+            if val_trimmed.lower().startswith("bearer "):
+                token_part = val_trimmed[7:].strip()
+                if not (
+                    (token_part.startswith("{{") and token_part.endswith("}}"))
+                    or token_part == "[REDACTED]"
+                    or token_part == ""
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Raw credentials or secrets are not allowed in request_template for '{key}'. Use placeholders like 'Bearer {{{{token}}}}' or '[REDACTED]'.",
+                    )
+                return
+
+            # If the key name itself suggests sensitivity
+            is_sensitive_key = (
+                lower_k in SENSITIVE_HEADER_NAMES
+                or any(p in lower_k for p in SENSITIVE_KEY_PATTERNS)
+            )
+            if is_sensitive_key:
+                if not (
+                    (val_trimmed.startswith("{{") and val_trimmed.endswith("}}"))
+                    or val_trimmed == "[REDACTED]"
+                    or val_trimmed == ""
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Raw credentials or secrets are not allowed in request_template key '{key}'. Use placeholders like '{{{{{key}}}}}' or '[REDACTED]'.",
+                    )
+        elif isinstance(val, dict):
+            for sub_k, sub_v in val.items():
+                check_item(sub_k, sub_v)
+        elif isinstance(val, list):
+            for item in val:
+                if isinstance(item, dict):
+                    for sub_k, sub_v in item.items():
+                        check_item(sub_k, sub_v)
+
+    for k, v in template.items():
+        check_item(k, v)
 
 
 def format_security_test_response(test: SecurityTest, db: Session) -> SecurityTestInDB:
@@ -458,6 +581,98 @@ def format_rule_response(rule: AuthorizationMatrixRule, db: Session) -> Authoriz
         expected_access=rule.expected_access,
         created_at=rule.created_at,
         updated_at=rule.updated_at,
+    )
+
+
+def format_workflow_step_response(step: WorkflowStep) -> WorkflowStepInDB:
+    endpoint_path = step.endpoint.path if step.endpoint else None
+    endpoint_method = step.endpoint.method if step.endpoint else None
+    identity_name = step.identity.name if step.identity else None
+    return WorkflowStepInDB(
+        id=step.id,
+        workflow_id=step.workflow_id,
+        step_order=step.step_order,
+        endpoint_id=step.endpoint_id,
+        endpoint_path=endpoint_path,
+        endpoint_method=endpoint_method,
+        identity_id=step.identity_id,
+        identity_name=identity_name,
+        http_method=step.http_method,
+        name=step.name,
+        description=step.description,
+        request_template=step.request_template,
+        expected_status_codes=step.expected_status_codes or [200],
+        created_at=step.created_at,
+        updated_at=step.updated_at,
+    )
+
+
+def format_workflow_state_response(state: WorkflowState) -> WorkflowStateInDB:
+    return WorkflowStateInDB(
+        id=state.id,
+        workflow_id=state.workflow_id,
+        name=state.name,
+        description=state.description,
+        is_initial=state.is_initial,
+        is_terminal=state.is_terminal,
+        created_at=state.created_at,
+        updated_at=state.updated_at,
+    )
+
+
+def format_workflow_transition_response(trans: WorkflowTransition) -> WorkflowTransitionInDB:
+    from_name = trans.from_state.name if trans.from_state else None
+    to_name = trans.to_state.name if trans.to_state else None
+    step_name = trans.step.name if trans.step else None
+    return WorkflowTransitionInDB(
+        id=trans.id,
+        workflow_id=trans.workflow_id,
+        from_state_id=trans.from_state_id,
+        from_state_name=from_name,
+        to_state_id=trans.to_state_id,
+        to_state_name=to_name,
+        step_id=trans.step_id,
+        step_name=step_name,
+        expected_behavior=trans.expected_behavior,
+        description=trans.description,
+        created_at=trans.created_at,
+        updated_at=trans.updated_at,
+    )
+
+
+def format_workflow_response(workflow: Workflow, db: Session) -> WorkflowInDB:
+    step_count = len(workflow.steps) if workflow.steps else 0
+    state_count = len(workflow.states) if workflow.states else 0
+    transition_count = len(workflow.transitions) if workflow.transitions else 0
+    return WorkflowInDB(
+        id=workflow.id,
+        project_id=workflow.project_id,
+        name=workflow.name,
+        description=workflow.description,
+        status=workflow.status,
+        step_count=step_count,
+        state_count=state_count,
+        transition_count=transition_count,
+        created_at=workflow.created_at,
+        updated_at=workflow.updated_at,
+    )
+
+
+def format_workflow_detail(workflow: Workflow, db: Session) -> WorkflowDetailInDB:
+    steps = [format_workflow_step_response(s) for s in workflow.steps]
+    states = [format_workflow_state_response(st) for st in workflow.states]
+    transitions = [format_workflow_transition_response(t) for t in workflow.transitions]
+    return WorkflowDetailInDB(
+        id=workflow.id,
+        project_id=workflow.project_id,
+        name=workflow.name,
+        description=workflow.description,
+        status=workflow.status,
+        steps=steps,
+        states=states,
+        transitions=transitions,
+        created_at=workflow.created_at,
+        updated_at=workflow.updated_at,
     )
 
 
@@ -2774,6 +2989,751 @@ def generate_auth_tests_for_project(
         )
 
 
+# ==============================================================================
+# STAGE 7.1: Stateful Workflow & Business Logic Security Endpoints
+# ==============================================================================
+
+workflow_router = APIRouter(tags=["workflows"])
+
+# ----------------- WORKFLOW CRUD -----------------
+
+@workflow_router.get("/projects/{project_id}/workflows", response_model=List[WorkflowInDB])
+def list_project_workflows(
+    project_id: int,
+    db: Session = Depends(get_db),
+):
+    """List all workflows defined in a project."""
+    get_project_or_404(project_id, db)
+    workflows = (
+        db.query(Workflow)
+        .filter(Workflow.project_id == project_id)
+        .order_by(Workflow.created_at.desc())
+        .all()
+    )
+    return [format_workflow_response(w, db) for w in workflows]
+
+
+@workflow_router.post("/projects/{project_id}/workflows", response_model=WorkflowInDB, status_code=status.HTTP_201_CREATED)
+def create_workflow(
+    project_id: int,
+    workflow_in: WorkflowCreate,
+    db: Session = Depends(get_db),
+):
+    """Create a new workflow model for a project."""
+    get_project_or_404(project_id, db)
+
+    status_val = workflow_in.status.upper()
+    if status_val not in ["DRAFT", "ACTIVE", "DISABLED"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid status '{workflow_in.status}'. Allowed statuses: DRAFT, ACTIVE, DISABLED.",
+        )
+
+    # Project-scoped unique name check
+    existing = (
+        db.query(Workflow)
+        .filter(Workflow.project_id == project_id, Workflow.name == workflow_in.name)
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Workflow with name '{workflow_in.name}' already exists in this project.",
+        )
+
+    workflow = Workflow(
+        project_id=project_id,
+        name=workflow_in.name,
+        description=workflow_in.description,
+        status=status_val,
+    )
+    db.add(workflow)
+    db.commit()
+    db.refresh(workflow)
+    return format_workflow_response(workflow, db)
+
+
+@workflow_router.get("/workflows/{workflow_id}", response_model=WorkflowDetailInDB)
+def get_workflow(
+    workflow_id: str,
+    db: Session = Depends(get_db),
+):
+    """Get full details of a workflow including steps, states, and transitions."""
+    workflow = get_workflow_or_404(workflow_id, db)
+    return format_workflow_detail(workflow, db)
+
+
+@workflow_router.patch("/workflows/{workflow_id}", response_model=WorkflowInDB)
+def update_workflow(
+    workflow_id: str,
+    workflow_update: WorkflowUpdate,
+    db: Session = Depends(get_db),
+):
+    """Update workflow name, description, or status."""
+    workflow = get_workflow_or_404(workflow_id, db)
+
+    if workflow_update.name is not None and workflow_update.name != workflow.name:
+        dup = (
+            db.query(Workflow)
+            .filter(
+                Workflow.project_id == workflow.project_id,
+                Workflow.name == workflow_update.name,
+                Workflow.id != workflow.id,
+            )
+            .first()
+        )
+        if dup:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Workflow with name '{workflow_update.name}' already exists in this project.",
+            )
+        workflow.name = workflow_update.name
+
+    if workflow_update.description is not None:
+        workflow.description = workflow_update.description
+
+    if workflow_update.status is not None:
+        status_val = workflow_update.status.upper()
+        if status_val not in ["DRAFT", "ACTIVE", "DISABLED"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid status '{workflow_update.status}'. Allowed statuses: DRAFT, ACTIVE, DISABLED.",
+            )
+        workflow.status = status_val
+
+    db.commit()
+    db.refresh(workflow)
+    return format_workflow_response(workflow, db)
+
+
+@workflow_router.delete("/workflows/{workflow_id}")
+def delete_workflow(
+    workflow_id: str,
+    db: Session = Depends(get_db),
+):
+    """Delete a workflow and cascade delete all its steps, states, and transitions."""
+    workflow = get_workflow_or_404(workflow_id, db)
+    db.delete(workflow)
+    db.commit()
+    return {"message": f"Workflow {workflow_id} deleted successfully"}
+
+
+# ----------------- WORKFLOW STEP CRUD -----------------
+
+@workflow_router.get("/workflows/{workflow_id}/steps", response_model=List[WorkflowStepInDB])
+def list_workflow_steps(
+    workflow_id: str,
+    db: Session = Depends(get_db),
+):
+    """List all steps for a workflow ordered by step_order."""
+    workflow = get_workflow_or_404(workflow_id, db)
+    return [format_workflow_step_response(s) for s in workflow.steps]
+
+
+@workflow_router.post("/workflows/{workflow_id}/steps", response_model=WorkflowStepInDB, status_code=status.HTTP_201_CREATED)
+def create_workflow_step(
+    workflow_id: str,
+    step_in: WorkflowStepCreate,
+    db: Session = Depends(get_db),
+):
+    """Add a step to a workflow."""
+    workflow = get_workflow_or_404(workflow_id, db)
+
+    # Safe HTTP methods check
+    method = step_in.http_method.upper()
+    if method not in ["GET", "HEAD"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Only safe HTTP methods (GET, HEAD) are allowed for workflow steps, got {step_in.http_method}",
+        )
+
+    # Request template secret validation
+    validate_request_template(step_in.request_template)
+
+    # Verify endpoint belongs to the same project
+    endpoint = db.query(Endpoint).filter(Endpoint.id == step_in.endpoint_id).first()
+    if not endpoint:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Endpoint with id {step_in.endpoint_id} not found",
+        )
+    if not endpoint.api or endpoint.api.project_id != workflow.project_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Endpoint does not belong to the same project as the workflow",
+        )
+
+    # Verify identity belongs to the same project if provided
+    if step_in.identity_id:
+        identity = db.query(Identity).filter(Identity.id == step_in.identity_id).first()
+        if not identity:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Identity with id {step_in.identity_id} not found",
+            )
+        if identity.project_id != workflow.project_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Identity does not belong to the same project as the workflow",
+            )
+
+    # Uniqueness of step_order per workflow
+    existing_order = (
+        db.query(WorkflowStep)
+        .filter(
+            WorkflowStep.workflow_id == workflow_id,
+            WorkflowStep.step_order == step_in.step_order,
+        )
+        .first()
+    )
+    if existing_order:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Step with order {step_in.step_order} already exists in this workflow",
+        )
+
+    step = WorkflowStep(
+        workflow_id=workflow_id,
+        step_order=step_in.step_order,
+        endpoint_id=step_in.endpoint_id,
+        identity_id=step_in.identity_id,
+        http_method=method,
+        name=step_in.name,
+        description=step_in.description,
+        request_template=step_in.request_template,
+        expected_status_codes=step_in.expected_status_codes or [200],
+    )
+    db.add(step)
+    db.commit()
+    db.refresh(step)
+    return format_workflow_step_response(step)
+
+
+@workflow_router.get("/workflows/{workflow_id}/steps/{step_id}", response_model=WorkflowStepInDB)
+@workflow_router.get("/workflow-steps/{step_id}", response_model=WorkflowStepInDB)
+def get_workflow_step(
+    step_id: str,
+    workflow_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Get a workflow step by ID."""
+    step = get_workflow_step_or_404(step_id, db)
+    if workflow_id and step.workflow_id != workflow_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow step {step_id} not found in workflow {workflow_id}",
+        )
+    return format_workflow_step_response(step)
+
+
+@workflow_router.patch("/workflows/{workflow_id}/steps/{step_id}", response_model=WorkflowStepInDB)
+@workflow_router.patch("/workflow-steps/{step_id}", response_model=WorkflowStepInDB)
+def update_workflow_step(
+    step_id: str,
+    step_update: WorkflowStepUpdate,
+    workflow_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Update a workflow step."""
+    step = get_workflow_step_or_404(step_id, db)
+    if workflow_id and step.workflow_id != workflow_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow step {step_id} not found in workflow {workflow_id}",
+        )
+    workflow = step.workflow
+
+    if step_update.http_method is not None:
+        method = step_update.http_method.upper()
+        if method not in ["GET", "HEAD"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Only safe HTTP methods (GET, HEAD) are allowed for workflow steps, got {step_update.http_method}",
+            )
+        step.http_method = method
+
+    if step_update.request_template is not None:
+        validate_request_template(step_update.request_template)
+        step.request_template = step_update.request_template
+
+    if step_update.endpoint_id is not None and step_update.endpoint_id != step.endpoint_id:
+        endpoint = db.query(Endpoint).filter(Endpoint.id == step_update.endpoint_id).first()
+        if not endpoint:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Endpoint with id {step_update.endpoint_id} not found",
+            )
+        if not endpoint.api or endpoint.api.project_id != workflow.project_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Endpoint does not belong to the same project as the workflow",
+            )
+        step.endpoint_id = step_update.endpoint_id
+
+    if step_update.identity_id is not None:
+        if step_update.identity_id != "":
+            identity = db.query(Identity).filter(Identity.id == step_update.identity_id).first()
+            if not identity:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Identity with id {step_update.identity_id} not found",
+                )
+            if identity.project_id != workflow.project_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Identity does not belong to the same project as the workflow",
+                )
+            step.identity_id = step_update.identity_id
+        else:
+            step.identity_id = None
+
+    if step_update.step_order is not None and step_update.step_order != step.step_order:
+        dup = (
+            db.query(WorkflowStep)
+            .filter(
+                WorkflowStep.workflow_id == step.workflow_id,
+                WorkflowStep.step_order == step_update.step_order,
+                WorkflowStep.id != step.id,
+            )
+            .first()
+        )
+        if dup:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Step with order {step_update.step_order} already exists in this workflow",
+            )
+        step.step_order = step_update.step_order
+
+    if step_update.name is not None:
+        step.name = step_update.name
+    if step_update.description is not None:
+        step.description = step_update.description
+    if step_update.expected_status_codes is not None:
+        step.expected_status_codes = step_update.expected_status_codes
+
+    db.commit()
+    db.refresh(step)
+    return format_workflow_step_response(step)
+
+
+@workflow_router.delete("/workflows/{workflow_id}/steps/{step_id}")
+@workflow_router.delete("/workflow-steps/{step_id}")
+def delete_workflow_step(
+    step_id: str,
+    workflow_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Delete a workflow step."""
+    step = get_workflow_step_or_404(step_id, db)
+    if workflow_id and step.workflow_id != workflow_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow step {step_id} not found in workflow {workflow_id}",
+        )
+    db.delete(step)
+    db.commit()
+    return {"message": f"Workflow step {step_id} deleted successfully"}
+
+
+# ----------------- WORKFLOW STATE CRUD -----------------
+
+@workflow_router.get("/workflows/{workflow_id}/states", response_model=List[WorkflowStateInDB])
+def list_workflow_states(
+    workflow_id: str,
+    db: Session = Depends(get_db),
+):
+    """List all states for a workflow."""
+    workflow = get_workflow_or_404(workflow_id, db)
+    return [format_workflow_state_response(s) for s in workflow.states]
+
+
+@workflow_router.post("/workflows/{workflow_id}/states", response_model=WorkflowStateInDB, status_code=status.HTTP_201_CREATED)
+def create_workflow_state(
+    workflow_id: str,
+    state_in: WorkflowStateCreate,
+    db: Session = Depends(get_db),
+):
+    """Create a state within a workflow."""
+    workflow = get_workflow_or_404(workflow_id, db)
+
+    dup = (
+        db.query(WorkflowState)
+        .filter(
+            WorkflowState.workflow_id == workflow_id,
+            WorkflowState.name == state_in.name,
+        )
+        .first()
+    )
+    if dup:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"State with name '{state_in.name}' already exists in this workflow",
+        )
+
+    state = WorkflowState(
+        workflow_id=workflow_id,
+        name=state_in.name,
+        description=state_in.description,
+        is_initial=state_in.is_initial,
+        is_terminal=state_in.is_terminal,
+    )
+    db.add(state)
+    db.commit()
+    db.refresh(state)
+    return format_workflow_state_response(state)
+
+
+@workflow_router.get("/workflows/{workflow_id}/states/{state_id}", response_model=WorkflowStateInDB)
+@workflow_router.get("/workflow-states/{state_id}", response_model=WorkflowStateInDB)
+def get_workflow_state(
+    state_id: str,
+    workflow_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Get a workflow state by ID."""
+    state = get_workflow_state_or_404(state_id, db)
+    if workflow_id and state.workflow_id != workflow_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow state {state_id} not found in workflow {workflow_id}",
+        )
+    return format_workflow_state_response(state)
+
+
+@workflow_router.patch("/workflows/{workflow_id}/states/{state_id}", response_model=WorkflowStateInDB)
+@workflow_router.patch("/workflow-states/{state_id}", response_model=WorkflowStateInDB)
+def update_workflow_state(
+    state_id: str,
+    state_update: WorkflowStateUpdate,
+    workflow_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Update a workflow state."""
+    state = get_workflow_state_or_404(state_id, db)
+    if workflow_id and state.workflow_id != workflow_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow state {state_id} not found in workflow {workflow_id}",
+        )
+
+    if state_update.name is not None and state_update.name != state.name:
+        dup = (
+            db.query(WorkflowState)
+            .filter(
+                WorkflowState.workflow_id == state.workflow_id,
+                WorkflowState.name == state_update.name,
+                WorkflowState.id != state.id,
+            )
+            .first()
+        )
+        if dup:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"State with name '{state_update.name}' already exists in this workflow",
+            )
+        state.name = state_update.name
+
+    if state_update.description is not None:
+        state.description = state_update.description
+    if state_update.is_initial is not None:
+        state.is_initial = state_update.is_initial
+    if state_update.is_terminal is not None:
+        state.is_terminal = state_update.is_terminal
+
+    db.commit()
+    db.refresh(state)
+    return format_workflow_state_response(state)
+
+
+@workflow_router.delete("/workflows/{workflow_id}/states/{state_id}")
+@workflow_router.delete("/workflow-states/{state_id}")
+def delete_workflow_state(
+    state_id: str,
+    workflow_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Delete a workflow state."""
+    state = get_workflow_state_or_404(state_id, db)
+    if workflow_id and state.workflow_id != workflow_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow state {state_id} not found in workflow {workflow_id}",
+        )
+    db.delete(state)
+    db.commit()
+    return {"message": f"Workflow state {state_id} deleted successfully"}
+
+
+# ----------------- WORKFLOW TRANSITION CRUD -----------------
+
+@workflow_router.get("/workflows/{workflow_id}/transitions", response_model=List[WorkflowTransitionInDB])
+def list_workflow_transitions(
+    workflow_id: str,
+    db: Session = Depends(get_db),
+):
+    """List all transitions for a workflow."""
+    workflow = get_workflow_or_404(workflow_id, db)
+    return [format_workflow_transition_response(t) for t in workflow.transitions]
+
+
+@workflow_router.post("/workflows/{workflow_id}/transitions", response_model=WorkflowTransitionInDB, status_code=status.HTTP_201_CREATED)
+def create_workflow_transition(
+    workflow_id: str,
+    transition_in: WorkflowTransitionCreate,
+    db: Session = Depends(get_db),
+):
+    """Create a transition between states in a workflow."""
+    workflow = get_workflow_or_404(workflow_id, db)
+
+    behavior = transition_in.expected_behavior.upper()
+    if behavior not in ["ALLOW", "DENY"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="expected_behavior must be ALLOW or DENY",
+        )
+
+    # Validate from_state
+    from_state = (
+        db.query(WorkflowState)
+        .filter(WorkflowState.id == transition_in.from_state_id)
+        .first()
+    )
+    if not from_state:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"From state {transition_in.from_state_id} not found",
+        )
+    if from_state.workflow_id != workflow_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="From state does not belong to this workflow",
+        )
+
+    # Validate to_state
+    to_state = (
+        db.query(WorkflowState)
+        .filter(WorkflowState.id == transition_in.to_state_id)
+        .first()
+    )
+    if not to_state:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"To state {transition_in.to_state_id} not found",
+        )
+    if to_state.workflow_id != workflow_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="To state does not belong to this workflow",
+        )
+
+    # Validate step if present
+    if transition_in.step_id:
+        step = (
+            db.query(WorkflowStep)
+            .filter(WorkflowStep.id == transition_in.step_id)
+            .first()
+        )
+        if not step:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Workflow step {transition_in.step_id} not found",
+            )
+        if step.workflow_id != workflow_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Workflow step does not belong to this workflow",
+            )
+
+    # Prevent duplicate transitions with identical from_state, to_state, and step
+    existing = (
+        db.query(WorkflowTransition)
+        .filter(
+            WorkflowTransition.workflow_id == workflow_id,
+            WorkflowTransition.from_state_id == transition_in.from_state_id,
+            WorkflowTransition.to_state_id == transition_in.to_state_id,
+            WorkflowTransition.step_id == transition_in.step_id,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Transition with identical from_state, to_state, and step already exists in this workflow",
+        )
+
+    trans = WorkflowTransition(
+        workflow_id=workflow_id,
+        from_state_id=transition_in.from_state_id,
+        to_state_id=transition_in.to_state_id,
+        step_id=transition_in.step_id,
+        expected_behavior=behavior,
+        description=transition_in.description,
+    )
+    db.add(trans)
+    db.commit()
+    db.refresh(trans)
+    return format_workflow_transition_response(trans)
+
+
+@workflow_router.get("/workflows/{workflow_id}/transitions/{transition_id}", response_model=WorkflowTransitionInDB)
+@workflow_router.get("/workflow-transitions/{transition_id}", response_model=WorkflowTransitionInDB)
+def get_workflow_transition(
+    transition_id: str,
+    workflow_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Get a workflow transition by ID."""
+    trans = get_workflow_transition_or_404(transition_id, db)
+    if workflow_id and trans.workflow_id != workflow_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow transition {transition_id} not found in workflow {workflow_id}",
+        )
+    return format_workflow_transition_response(trans)
+
+
+@workflow_router.patch("/workflows/{workflow_id}/transitions/{transition_id}", response_model=WorkflowTransitionInDB)
+@workflow_router.patch("/workflow-transitions/{transition_id}", response_model=WorkflowTransitionInDB)
+def update_workflow_transition(
+    transition_id: str,
+    transition_update: WorkflowTransitionUpdate,
+    workflow_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Update a workflow transition."""
+    trans = get_workflow_transition_or_404(transition_id, db)
+    if workflow_id and trans.workflow_id != workflow_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow transition {transition_id} not found in workflow {workflow_id}",
+        )
+
+    target_from = (
+        transition_update.from_state_id
+        if transition_update.from_state_id is not None
+        else trans.from_state_id
+    )
+    target_to = (
+        transition_update.to_state_id
+        if transition_update.to_state_id is not None
+        else trans.to_state_id
+    )
+    target_step = (
+        transition_update.step_id
+        if transition_update.step_id is not None
+        else trans.step_id
+    )
+    if target_step == "":
+        target_step = None
+
+    if (
+        transition_update.from_state_id is not None
+        and transition_update.from_state_id != trans.from_state_id
+    ):
+        from_st = db.query(WorkflowState).filter(WorkflowState.id == target_from).first()
+        if not from_st:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="From state not found"
+            )
+        if from_st.workflow_id != trans.workflow_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="From state does not belong to this workflow",
+            )
+
+    if (
+        transition_update.to_state_id is not None
+        and transition_update.to_state_id != trans.to_state_id
+    ):
+        to_st = db.query(WorkflowState).filter(WorkflowState.id == target_to).first()
+        if not to_st:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="To state not found"
+            )
+        if to_st.workflow_id != trans.workflow_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="To state does not belong to this workflow",
+            )
+
+    if (
+        transition_update.step_id is not None
+        and target_step is not None
+        and target_step != trans.step_id
+    ):
+        st = db.query(WorkflowStep).filter(WorkflowStep.id == target_step).first()
+        if not st:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Workflow step not found"
+            )
+        if st.workflow_id != trans.workflow_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Workflow step does not belong to this workflow",
+            )
+
+    if (
+        target_from != trans.from_state_id
+        or target_to != trans.to_state_id
+        or target_step != trans.step_id
+    ):
+        dup = (
+            db.query(WorkflowTransition)
+            .filter(
+                WorkflowTransition.workflow_id == trans.workflow_id,
+                WorkflowTransition.from_state_id == target_from,
+                WorkflowTransition.to_state_id == target_to,
+                WorkflowTransition.step_id == target_step,
+                WorkflowTransition.id != trans.id,
+            )
+            .first()
+        )
+        if dup:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Transition with identical from_state, to_state, and step already exists",
+            )
+
+    if transition_update.expected_behavior is not None:
+        behavior = transition_update.expected_behavior.upper()
+        if behavior not in ["ALLOW", "DENY"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="expected_behavior must be ALLOW or DENY",
+            )
+        trans.expected_behavior = behavior
+
+    trans.from_state_id = target_from
+    trans.to_state_id = target_to
+    trans.step_id = target_step
+
+    if transition_update.description is not None:
+        trans.description = transition_update.description
+
+    db.commit()
+    db.refresh(trans)
+    return format_workflow_transition_response(trans)
+
+
+@workflow_router.delete("/workflows/{workflow_id}/transitions/{transition_id}")
+@workflow_router.delete("/workflow-transitions/{transition_id}")
+def delete_workflow_transition(
+    transition_id: str,
+    workflow_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Delete a workflow transition."""
+    trans = get_workflow_transition_or_404(transition_id, db)
+    if workflow_id and trans.workflow_id != workflow_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow transition {transition_id} not found in workflow {workflow_id}",
+        )
+    db.delete(trans)
+    db.commit()
+    return {"message": f"Workflow transition {transition_id} deleted successfully"}
+
+
 # Include sub-routers into main router
 router.include_router(project_router)
 router.include_router(api_router)
@@ -2790,3 +3750,4 @@ router.include_router(matrix_router)
 router.include_router(policy_router)
 router.include_router(property_router)
 router.include_router(auth_security_router)
+router.include_router(workflow_router)
