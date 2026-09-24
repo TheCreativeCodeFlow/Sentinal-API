@@ -26,6 +26,8 @@ from app.models import (
     WorkflowStep,
     WorkflowState,
     WorkflowTransition,
+    WorkflowExecution,
+    WorkflowStepExecution,
 )
 from app.schemas import (
     ProjectCreate,
@@ -111,6 +113,9 @@ from app.schemas import (
     WorkflowTransitionCreate,
     WorkflowTransitionUpdate,
     WorkflowTransitionInDB,
+    WorkflowStepExecutionInDB,
+    WorkflowExecutionInDB,
+    WorkflowExecutionDetailInDB,
 )
 from app.services.security_engine.redactor import SENSITIVE_HEADER_NAMES
 
@@ -414,6 +419,8 @@ def format_evidence_response(evidence: Optional[Evidence]) -> Optional[EvidenceI
     return EvidenceInDB(
         id=evidence.id,
         execution_id=evidence.execution_id,
+        workflow_execution_id=evidence.workflow_execution_id,
+        workflow_step_execution_id=evidence.workflow_step_execution_id,
         finding_id=evidence.finding_id,
         request_metadata=req_meta,
         response_metadata=resp_meta,
@@ -470,6 +477,9 @@ def format_finding_response(finding: Finding, db: Session) -> FindingInDB:
     if not victim_res and finding.resource_id:
         victim_res = db.query(Resource).filter(Resource.id == finding.resource_id).first()
 
+    workflow_name = finding.workflow.name if finding.workflow else None
+    workflow_step_name = finding.workflow_step.name if finding.workflow_step else None
+
     exposed_props = None
     if finding.exposed_properties:
         try:
@@ -482,6 +492,9 @@ def format_finding_response(finding: Finding, db: Session) -> FindingInDB:
         project_id=finding.project_id,
         security_test_id=finding.security_test_id,
         execution_id=finding.execution_id,
+        workflow_id=finding.workflow_id,
+        workflow_execution_id=finding.workflow_execution_id,
+        workflow_step_id=finding.workflow_step_id,
         endpoint_id=finding.endpoint_id or (endpoint.id if endpoint else None),
         attacker_identity_id=finding.attacker_identity_id or (attacker.id if attacker else None),
         attacker_role_id=finding.attacker_role_id or (attacker_role.id if attacker_role else None),
@@ -505,6 +518,8 @@ def format_finding_response(finding: Finding, db: Session) -> FindingInDB:
         attacker_role_name=attacker_role.name if attacker_role else None,
         victim_resource_name=victim_res.name if victim_res else None,
         victim_resource_instance_id=finding.security_test.victim_resource_instance_id if finding.security_test else None,
+        workflow_name=workflow_name,
+        workflow_step_name=workflow_step_name,
     )
 
 
@@ -513,6 +528,8 @@ def format_finding_detail(finding: Finding, db: Session) -> FindingDetail:
     ev = db.query(Evidence).filter(Evidence.finding_id == finding.id).first()
     if not ev and finding.execution:
         ev = finding.execution.evidence
+    if not ev and finding.workflow_execution_id:
+        ev = db.query(Evidence).filter(Evidence.workflow_execution_id == finding.workflow_execution_id).first()
     ev_in_db = format_evidence_response(ev)
 
     data = base.model_dump()
@@ -673,6 +690,78 @@ def format_workflow_detail(workflow: Workflow, db: Session) -> WorkflowDetailInD
         transitions=transitions,
         created_at=workflow.created_at,
         updated_at=workflow.updated_at,
+    )
+
+
+def get_workflow_execution_or_404(execution_id: str, db: Session) -> WorkflowExecution:
+    """Helper to get workflow execution or raise 404."""
+    we = db.query(WorkflowExecution).filter(WorkflowExecution.id == execution_id).first()
+    if not we:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow execution with id {execution_id} not found",
+        )
+    return we
+
+
+def format_workflow_step_execution_response(step_exec: WorkflowStepExecution) -> WorkflowStepExecutionInDB:
+    return WorkflowStepExecutionInDB(
+        id=step_exec.id,
+        workflow_execution_id=step_exec.workflow_execution_id,
+        step_id=step_exec.step_id,
+        step_order=step_exec.step_order,
+        http_method=step_exec.http_method,
+        endpoint_path=step_exec.endpoint_path,
+        status=step_exec.status,
+        request_summary=step_exec.request_summary,
+        response_summary=step_exec.response_summary,
+        status_code=step_exec.status_code,
+        latency_ms=step_exec.latency_ms,
+        state_before=step_exec.state_before,
+        state_after=step_exec.state_after,
+        transition_expected=step_exec.transition_expected,
+        transition_result=step_exec.transition_result,
+        correlation_id=step_exec.correlation_id,
+        error_message=step_exec.error_message,
+        created_at=step_exec.created_at,
+        step_name=step_exec.step.name if step_exec.step else None,
+    )
+
+
+def format_workflow_execution_response(execution: WorkflowExecution, db: Session) -> WorkflowExecutionInDB:
+    step_count = len(execution.step_executions) if execution.step_executions else 0
+    findings_count = len(execution.findings) if execution.findings else 0
+    return WorkflowExecutionInDB(
+        id=execution.id,
+        workflow_id=execution.workflow_id,
+        status=execution.status,
+        result=execution.result,
+        result_reason=execution.result_reason,
+        triggered_by=execution.triggered_by,
+        current_state_id=execution.current_state_id,
+        correlation_id=execution.correlation_id,
+        started_at=execution.started_at,
+        completed_at=execution.completed_at,
+        error_message=execution.error_message,
+        created_at=execution.created_at,
+        step_count=step_count,
+        findings_count=findings_count,
+    )
+
+
+def format_workflow_execution_detail(execution: WorkflowExecution, db: Session) -> WorkflowExecutionDetailInDB:
+    base = format_workflow_execution_response(execution, db)
+    step_execs = [
+        format_workflow_step_execution_response(se)
+        for se in sorted(execution.step_executions, key=lambda s: s.step_order)
+    ]
+    findings = [format_finding_response(f, db) for f in execution.findings]
+    return WorkflowExecutionDetailInDB(
+        **base.model_dump(),
+        workflow_name=execution.workflow.name if execution.workflow else None,
+        current_state_name=execution.current_state.name if execution.current_state else None,
+        step_executions=step_execs,
+        findings=findings,
     )
 
 
@@ -3732,6 +3821,72 @@ def delete_workflow_transition(
     db.delete(trans)
     db.commit()
     return {"message": f"Workflow transition {transition_id} deleted successfully"}
+
+
+# ----------------- WORKFLOW EXECUTION ENDPOINTS -----------------
+
+@workflow_router.post("/workflows/{workflow_id}/execute", response_model=WorkflowExecutionDetailInDB)
+async def execute_workflow_endpoint(
+    workflow_id: str,
+    db: Session = Depends(get_db),
+):
+    """Execute an active workflow statefully."""
+    workflow = get_workflow_or_404(workflow_id, db)
+    from app.main import app as fastapi_app
+    from app.services.security_engine.workflow_engine import WorkflowEngine
+
+    engine = WorkflowEngine(db=db, app=fastapi_app)
+    execution = await engine.execute_workflow(workflow, triggered_by="MANUAL")
+    return format_workflow_execution_detail(execution, db)
+
+
+@workflow_router.get("/workflows/{workflow_id}/executions", response_model=List[WorkflowExecutionInDB])
+def list_workflow_executions(
+    workflow_id: str,
+    db: Session = Depends(get_db),
+):
+    """List all executions for a workflow."""
+    workflow = get_workflow_or_404(workflow_id, db)
+    executions = (
+        db.query(WorkflowExecution)
+        .filter(WorkflowExecution.workflow_id == workflow.id)
+        .order_by(WorkflowExecution.created_at.desc())
+        .all()
+    )
+    return [format_workflow_execution_response(e, db) for e in executions]
+
+
+@workflow_router.get("/workflow-executions/{execution_id}", response_model=WorkflowExecutionDetailInDB)
+def get_workflow_execution(
+    execution_id: str,
+    db: Session = Depends(get_db),
+):
+    """Get workflow execution details, including step executions, findings, and evidence."""
+    execution = get_workflow_execution_or_404(execution_id, db)
+    return format_workflow_execution_detail(execution, db)
+
+
+@workflow_router.post("/workflow-executions/{execution_id}/replay", response_model=WorkflowExecutionDetailInDB)
+async def replay_workflow_execution_endpoint(
+    execution_id: str,
+    db: Session = Depends(get_db),
+):
+    """Replay an existing workflow execution."""
+    execution = get_workflow_execution_or_404(execution_id, db)
+    workflow = execution.workflow
+    if not workflow:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Associated workflow not found",
+        )
+
+    from app.main import app as fastapi_app
+    from app.services.security_engine.workflow_engine import WorkflowEngine
+
+    engine = WorkflowEngine(db=db, app=fastapi_app)
+    new_execution = await engine.execute_workflow(workflow, triggered_by="REPLAY")
+    return format_workflow_execution_detail(new_execution, db)
+
 
 
 # Include sub-routers into main router

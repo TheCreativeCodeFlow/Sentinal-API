@@ -343,7 +343,9 @@ class SecurityTestInDB(BaseModel):
 
 class EvidenceInDB(BaseModel):
     id: str
-    execution_id: str
+    execution_id: Optional[str] = None
+    workflow_execution_id: Optional[str] = None
+    workflow_step_execution_id: Optional[str] = None
     finding_id: Optional[str] = None
     request_metadata: Optional[Dict[str, Any]] = None
     response_metadata: Optional[Dict[str, Any]] = None
@@ -377,8 +379,11 @@ class TestExecutionInDB(BaseModel):
 class FindingInDB(BaseModel):
     id: str
     project_id: int
-    security_test_id: str
-    execution_id: str
+    security_test_id: Optional[str] = None
+    execution_id: Optional[str] = None
+    workflow_id: Optional[str] = None
+    workflow_execution_id: Optional[str] = None
+    workflow_step_id: Optional[str] = None
     endpoint_id: Optional[int] = None
     attacker_identity_id: Optional[str] = None
     attacker_role_id: Optional[str] = None
@@ -402,6 +407,8 @@ class FindingInDB(BaseModel):
     attacker_role_name: Optional[str] = None
     victim_resource_name: Optional[str] = None
     victim_resource_instance_id: Optional[str] = None
+    workflow_name: Optional[str] = None
+    workflow_step_name: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -798,3 +805,57 @@ class WorkflowDetailInDB(WorkflowBase):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# ==============================================================================
+# STAGE 7.2: Stateful Workflow Execution Schemas
+# ==============================================================================
+
+class WorkflowStepExecutionInDB(BaseModel):
+    id: str
+    workflow_execution_id: str
+    step_id: Optional[str] = None
+    step_order: int
+    http_method: Optional[str] = None
+    endpoint_path: Optional[str] = None
+    status: str  # PASS, CONFIRMED, INCONCLUSIVE, ERROR, SKIPPED
+    request_summary: Optional[Dict[str, Any]] = None
+    response_summary: Optional[Dict[str, Any]] = None
+    status_code: Optional[int] = None
+    latency_ms: Optional[int] = None
+    state_before: Optional[str] = None
+    state_after: Optional[str] = None
+    transition_expected: Optional[str] = None
+    transition_result: Optional[str] = None
+    correlation_id: Optional[str] = None
+    error_message: Optional[str] = None
+    created_at: datetime
+    step_name: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class WorkflowExecutionInDB(BaseModel):
+    id: str
+    workflow_id: str
+    status: str  # QUEUED, RUNNING, COMPLETED, FAILED
+    result: Optional[str] = None  # PASS, CONFIRMED, INCONCLUSIVE, ERROR
+    result_reason: Optional[str] = None
+    triggered_by: str = "MANUAL"
+    current_state_id: Optional[str] = None
+    correlation_id: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    error_message: Optional[str] = None
+    created_at: datetime
+    step_count: Optional[int] = 0
+    findings_count: Optional[int] = 0
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class WorkflowExecutionDetailInDB(WorkflowExecutionInDB):
+    workflow_name: Optional[str] = None
+    current_state_name: Optional[str] = None
+    step_executions: List[WorkflowStepExecutionInDB] = []
+    findings: List[FindingInDB] = []

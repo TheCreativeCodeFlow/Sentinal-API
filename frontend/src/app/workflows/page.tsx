@@ -89,6 +89,61 @@ interface WorkflowDetailItem extends WorkflowItem {
   transitions: WorkflowTransitionItem[];
 }
 
+interface WorkflowExecutionItem {
+  id: string;
+  workflow_id: string;
+  status: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED";
+  result: "PASS" | "CONFIRMED" | "INCONCLUSIVE" | "ERROR" | null;
+  result_reason: string | null;
+  triggered_by: "MANUAL" | "REPLAY";
+  current_state_id: string | null;
+  correlation_id: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  error_message: string | null;
+  created_at: string;
+  step_count: number;
+  findings_count: number;
+}
+
+interface WorkflowStepExecutionItem {
+  id: string;
+  workflow_execution_id: string;
+  step_id: string | null;
+  step_order: number;
+  http_method: string | null;
+  endpoint_path: string | null;
+  status: "PASS" | "CONFIRMED" | "INCONCLUSIVE" | "ERROR" | "SKIPPED";
+  request_summary: Record<string, unknown> | null;
+  response_summary: Record<string, unknown> | null;
+  status_code: number | null;
+  latency_ms: number | null;
+  state_before: string | null;
+  state_after: string | null;
+  transition_expected: string | null;
+  transition_result: string | null;
+  correlation_id: string | null;
+  error_message: string | null;
+  created_at: string;
+  step_name?: string | null;
+}
+
+interface WorkflowExecutionDetailItem extends WorkflowExecutionItem {
+  workflow_name?: string | null;
+  current_state_name?: string | null;
+  step_executions: WorkflowStepExecutionItem[];
+  findings: Array<{
+    id: string;
+    type: string;
+    severity: string;
+    title: string;
+    description: string;
+    remediation: string;
+    expected_authorization?: string | null;
+    actual_behavior?: string | null;
+  }>;
+}
+
 export default function WorkflowsPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null);
@@ -99,13 +154,22 @@ export default function WorkflowsPage() {
   const [endpoints, setEndpoints] = useState<EndpointItem[]>([]);
   const [identities, setIdentities] = useState<IdentityItem[]>([]);
 
+  // Stage 7.2 Executions state
+  const [executions, setExecutions] = useState<WorkflowExecutionItem[]>([]);
+  const [selectedExecution, setSelectedExecution] = useState<WorkflowExecutionDetailItem | null>(null);
+  const [executing, setExecuting] = useState(false);
+  const [replaying, setReplaying] = useState(false);
+  const [loadingExecutionDetail, setLoadingExecutionDetail] = useState(false);
+  const [showEvidenceModal, setShowEvidenceModal] = useState(false);
+  const [selectedStepEvidence, setSelectedStepEvidence] = useState<WorkflowStepExecutionItem | null>(null);
+
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
   // Active view tab
-  const [activeTab, setActiveTab] = useState<"steps" | "states" | "transitions">("steps");
+  const [activeTab, setActiveTab] = useState<"steps" | "states" | "transitions" | "executions">("steps");
 
   // Modals state
   const [showWfModal, setShowWfModal] = useState(false);
@@ -240,6 +304,126 @@ export default function WorkflowsPage() {
       ignore = true;
     };
   }, [selectedWorkflowId, reloadKey]);
+
+  // Load Executions for selected workflow
+  const loadExecutions = async (wfId: string) => {
+    try {
+      const res = await fetch(`/api/v1/workflows/${wfId}/executions`, { credentials: "include" });
+      if (res.ok) {
+        const data: WorkflowExecutionItem[] = await res.json();
+        setExecutions(data);
+        if (data.length > 0) {
+          loadExecutionDetail(data[0].id);
+        } else {
+          setSelectedExecution(null);
+        }
+      }
+    } catch {
+      // non-critical
+    }
+  };
+
+  const loadExecutionDetail = async (execId: string) => {
+    try {
+      setLoadingExecutionDetail(true);
+      const res = await fetch(`/api/v1/workflow-executions/${execId}`, { credentials: "include" });
+      if (res.ok) {
+        const data: WorkflowExecutionDetailItem = await res.json();
+        setSelectedExecution(data);
+      }
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : "Failed to load execution detail");
+    } finally {
+      setLoadingExecutionDetail(false);
+    }
+  };
+
+  useEffect(() => {
+    let ignore = false;
+    async function fetchExecutions() {
+      if (!selectedWorkflowId) {
+        setExecutions([]);
+        setSelectedExecution(null);
+        return;
+      }
+      try {
+        const res = await fetch(`/api/v1/workflows/${selectedWorkflowId}/executions`, { credentials: "include" });
+        if (res.ok && !ignore) {
+          const data: WorkflowExecutionItem[] = await res.json();
+          setExecutions(data);
+          if (data.length > 0) {
+            const detailRes = await fetch(`/api/v1/workflow-executions/${data[0].id}`, { credentials: "include" });
+            if (detailRes.ok && !ignore) {
+              const detailData: WorkflowExecutionDetailItem = await detailRes.json();
+              setSelectedExecution(detailData);
+            }
+          } else {
+            setSelectedExecution(null);
+          }
+        }
+      } catch {
+        // non-critical
+      }
+    }
+    fetchExecutions();
+    return () => {
+      ignore = true;
+    };
+  }, [selectedWorkflowId, reloadKey]);
+
+  // Stage 7.2 Run Workflow Handler
+  const handleRunWorkflow = async () => {
+    if (!selectedWorkflowId) return;
+    try {
+      setExecuting(true);
+      setErrorMsg(null);
+      setSuccessMsg(null);
+      const res = await fetch(`/api/v1/workflows/${selectedWorkflowId}/execute`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || "Failed to execute workflow");
+      }
+      const data: WorkflowExecutionDetailItem = await res.json();
+      setSelectedExecution(data);
+      setSuccessMsg(`Workflow executed with result: ${data.result}`);
+      setActiveTab("executions");
+      await loadExecutions(selectedWorkflowId);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : "Failed to execute workflow");
+    } finally {
+      setExecuting(false);
+    }
+  };
+
+  // Stage 7.2 Replay Execution Handler
+  const handleReplayExecution = async (execId: string) => {
+    try {
+      setReplaying(true);
+      setErrorMsg(null);
+      setSuccessMsg(null);
+      const res = await fetch(`/api/v1/workflow-executions/${execId}/replay`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || "Failed to replay execution");
+      }
+      const data: WorkflowExecutionDetailItem = await res.json();
+      setSelectedExecution(data);
+      setSuccessMsg(`Workflow replayed with result: ${data.result}`);
+      if (selectedWorkflowId) {
+        await loadExecutions(selectedWorkflowId);
+      }
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : "Failed to replay execution");
+    } finally {
+      setReplaying(false);
+    }
+  };
 
   // Reload workflows list
   const reloadWorkflowsList = async (selectId?: string) => {
@@ -631,6 +815,7 @@ export default function WorkflowsPage() {
   };
 
   const activeWorkflow = workflows.find((w) => w.id === selectedWorkflowId);
+  const activeProject = projects.find((p) => p.id === selectedProjectId);
 
   return (
     <div className="space-y-6">
@@ -638,10 +823,10 @@ export default function WorkflowsPage() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-border pb-5">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-foreground">
-            Stateful Workflows & Business Logic Modeling
+            Stateful Workflows & Business Logic Engine
           </h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Model multi-step API sequences, business states, and authorization transition rules (Stage 7.1 Domain Modeling)
+            Model multi-step API sequences, business states, and execute stateful authorization workflows (Stage 7.2)
           </p>
         </div>
 
@@ -665,12 +850,12 @@ export default function WorkflowsPage() {
         </div>
       </div>
 
-      {/* Stage 7.1 Safety & Scope Banner */}
+      {/* Stage 7.2 Safety & Execution Banner */}
       <div className="rounded-lg border border-blue-500/30 bg-blue-500/10 p-4 text-xs leading-relaxed text-blue-300">
         <div className="flex items-start gap-2">
-          <span className="text-base font-bold">ℹ️</span>
+          <span className="text-base font-bold">🛡️</span>
           <div>
-            <strong className="font-semibold text-blue-200">Stage 7.1 Domain Modeling Mode:</strong> This engine models API workflow sequences, states, and transition rules. Execution and automated attack generation are intentionally omitted in this foundation stage. Workflow steps are strictly limited to safe HTTP methods (GET and HEAD), and credential values must use placeholders (e.g. <code className="bg-blue-950 px-1 py-0.5 rounded text-blue-200">{"{{token}}"}</code>) or <code className="bg-blue-950 px-1 py-0.5 rounded text-blue-200">[REDACTED]</code>.
+            <strong className="font-semibold text-blue-200">Stage 7.2 Stateful Execution Engine Active:</strong> Safely executes defined workflows against target endpoints using non-destructive GET/HEAD requests. Tracks business state transitions across steps, sanitizes evidence, verifies transition invariants, and flags invalid state transitions or unexpected states as findings.
           </div>
         </div>
       </div>
@@ -796,6 +981,31 @@ export default function WorkflowsPage() {
                   <div className="flex items-center gap-2">
                     <Button
                       size="sm"
+                      disabled={executing || workflowDetail.status !== "ACTIVE" || activeProject?.authorization_status !== "authorized"}
+                      onClick={handleRunWorkflow}
+                      className="bg-emerald-600 hover:bg-emerald-500 text-white font-medium"
+                      title={
+                        activeProject?.authorization_status !== "authorized"
+                          ? "Project must be authorized before executing workflows"
+                          : workflowDetail.status !== "ACTIVE"
+                          ? "Workflow must be ACTIVE to run"
+                          : "Execute stateful workflow"
+                      }
+                    >
+                      {executing ? (
+                        <span className="flex items-center gap-1.5">
+                          <span className="inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                          Executing...
+                        </span>
+                      ) : (
+                        <span className="flex items-center gap-1.5">
+                          <span>▶</span>
+                          Run Workflow
+                        </span>
+                      )}
+                    </Button>
+                    <Button
+                      size="sm"
                       variant="outline"
                       onClick={() => handleOpenEditWf(workflowDetail)}
                     >
@@ -842,6 +1052,16 @@ export default function WorkflowsPage() {
                     }`}
                   >
                     State Transitions ({workflowDetail.transitions.length})
+                  </button>
+                  <button
+                    onClick={() => setActiveTab("executions")}
+                    className={`px-4 py-2 text-xs font-semibold border-b-2 transition-colors ${
+                      activeTab === "executions"
+                        ? "border-primary text-primary"
+                        : "border-transparent text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    Execution History ({executions.length})
                   </button>
                 </div>
               </Card>
@@ -1111,6 +1331,337 @@ export default function WorkflowsPage() {
                           ))}
                         </tbody>
                       </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Tab 4: Execution History */}
+              {activeTab === "executions" && (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="text-sm font-semibold text-foreground">
+                        Execution History & Findings
+                      </h3>
+                      <p className="text-xs text-muted-foreground">
+                        Ordered execution traces, transition validations, and security findings.
+                      </p>
+                    </div>
+                    <Button
+                      size="sm"
+                      disabled={executing || workflowDetail.status !== "ACTIVE" || activeProject?.authorization_status !== "authorized"}
+                      onClick={handleRunWorkflow}
+                      className="bg-emerald-600 hover:bg-emerald-500 text-white font-medium"
+                    >
+                      {executing ? (
+                        <span className="flex items-center gap-1.5">
+                          <span className="inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                          Executing...
+                        </span>
+                      ) : (
+                        <span className="flex items-center gap-1.5">
+                          <span>▶</span>
+                          Run Workflow
+                        </span>
+                      )}
+                    </Button>
+                  </div>
+
+                  {executions.length === 0 ? (
+                    <div className="border border-dashed border-border rounded-lg p-8 text-center text-muted-foreground text-xs">
+                      No executions recorded yet. Click &quot;Run Workflow&quot; to execute this workflow against target endpoints.
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                      {/* Left: Executions List */}
+                      <div className="lg:col-span-1 space-y-2.5">
+                        <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1">
+                          Past Runs ({executions.length})
+                        </div>
+                        <div className="space-y-2 max-h-[600px] overflow-y-auto pr-1">
+                          {executions.map((ex) => {
+                            const isSelected = selectedExecution?.id === ex.id;
+                            const resultColor =
+                              ex.result === "PASS"
+                                ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
+                                : ex.result === "CONFIRMED"
+                                ? "bg-destructive/20 text-destructive border-destructive/30"
+                                : ex.result === "INCONCLUSIVE"
+                                ? "bg-amber-500/20 text-amber-300 border-amber-500/30"
+                                : "bg-zinc-500/20 text-zinc-300 border-zinc-500/30";
+
+                            return (
+                              <div
+                                key={ex.id}
+                                onClick={() => loadExecutionDetail(ex.id)}
+                                className={`p-3 rounded-lg border cursor-pointer transition-all ${
+                                  isSelected
+                                    ? "border-primary bg-accent/40 shadow-xs"
+                                    : "border-border hover:bg-card/60"
+                                }`}
+                              >
+                                <div className="flex items-center justify-between gap-2 mb-1.5">
+                                  <span
+                                    className={`text-[10px] font-bold px-2 py-0.5 rounded border uppercase ${resultColor}`}
+                                  >
+                                    {ex.result || ex.status}
+                                  </span>
+                                  <span className="text-[10px] font-mono text-muted-foreground">
+                                    {ex.triggered_by}
+                                  </span>
+                                </div>
+                                <div className="text-xs text-foreground font-medium truncate">
+                                  {ex.result_reason || "Workflow Execution"}
+                                </div>
+                                <div className="flex items-center justify-between text-[11px] text-muted-foreground mt-2 pt-2 border-t border-border/50">
+                                  <span>{ex.step_count} step{ex.step_count !== 1 ? "s" : ""}</span>
+                                  {ex.findings_count > 0 && (
+                                    <span className="font-semibold text-destructive">
+                                      {ex.findings_count} finding{ex.findings_count !== 1 ? "s" : ""}
+                                    </span>
+                                  )}
+                                  <span>
+                                    {ex.started_at ? new Date(ex.started_at).toLocaleTimeString() : "-"}
+                                  </span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Right: Selected Execution Details */}
+                      <div className="lg:col-span-2">
+                        {loadingExecutionDetail ? (
+                          <div className="border border-border rounded-lg p-12 text-center text-muted-foreground text-xs">
+                            Loading execution trace...
+                          </div>
+                        ) : selectedExecution ? (
+                          <div className="space-y-4">
+                            {/* Summary Card */}
+                            <Card className="p-4 space-y-3">
+                              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-border">
+                                <div className="space-y-1">
+                                  <div className="flex items-center gap-2">
+                                    <span
+                                      className={`text-xs font-bold px-2.5 py-0.5 rounded border uppercase ${
+                                        selectedExecution.result === "PASS"
+                                          ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
+                                          : selectedExecution.result === "CONFIRMED"
+                                          ? "bg-destructive/20 text-destructive border-destructive/30"
+                                          : "bg-amber-500/20 text-amber-300 border-amber-500/30"
+                                      }`}
+                                    >
+                                      {selectedExecution.result || selectedExecution.status}
+                                    </span>
+                                    <span className="text-xs text-muted-foreground font-medium">
+                                      Status: {selectedExecution.status}
+                                    </span>
+                                    <span className="text-xs text-muted-foreground">
+                                      • Trigger: {selectedExecution.triggered_by}
+                                    </span>
+                                  </div>
+                                  <p className="text-xs text-foreground font-medium">
+                                    {selectedExecution.result_reason || "Execution completed"}
+                                  </p>
+                                </div>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={replaying}
+                                  onClick={() => handleReplayExecution(selectedExecution.id)}
+                                  className="whitespace-nowrap"
+                                >
+                                  {replaying ? (
+                                    <span className="flex items-center gap-1.5">
+                                      <span className="inline-block w-3 h-3 border-2 border-foreground border-t-transparent rounded-full animate-spin" />
+                                      Replaying...
+                                    </span>
+                                  ) : (
+                                    <span className="flex items-center gap-1.5">
+                                      <span>↺</span>
+                                      Replay Run
+                                    </span>
+                                  )}
+                                </Button>
+                              </div>
+
+                              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                                <div>
+                                  <span className="text-muted-foreground block text-[10px]">CORRELATION ID</span>
+                                  <span className="font-mono text-[11px] truncate block" title={selectedExecution.correlation_id || ""}>
+                                    {selectedExecution.correlation_id || "-"}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="text-muted-foreground block text-[10px]">CURRENT STATE</span>
+                                  <span className="font-semibold text-[11px] text-foreground">
+                                    {selectedExecution.current_state_name || "-"}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="text-muted-foreground block text-[10px]">STARTED AT</span>
+                                  <span className="text-[11px] text-muted-foreground">
+                                    {selectedExecution.started_at ? new Date(selectedExecution.started_at).toLocaleTimeString() : "-"}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="text-muted-foreground block text-[10px]">COMPLETED AT</span>
+                                  <span className="text-[11px] text-muted-foreground">
+                                    {selectedExecution.completed_at ? new Date(selectedExecution.completed_at).toLocaleTimeString() : "-"}
+                                  </span>
+                                </div>
+                              </div>
+
+                              {selectedExecution.error_message && (
+                                <div className="bg-destructive/10 border border-destructive/30 rounded p-2.5 text-xs text-destructive">
+                                  <strong>Error:</strong> {selectedExecution.error_message}
+                                </div>
+                              )}
+                            </Card>
+
+                            {/* Findings block (if any) */}
+                            {selectedExecution.findings && selectedExecution.findings.length > 0 && (
+                              <div className="space-y-2">
+                                <div className="text-xs font-semibold text-destructive uppercase tracking-wider flex items-center gap-1.5">
+                                  <span>⚠️</span>
+                                  Detected Findings ({selectedExecution.findings.length})
+                                </div>
+                                {selectedExecution.findings.map((finding) => (
+                                  <div
+                                    key={finding.id}
+                                    className="p-3 rounded-lg border border-destructive/40 bg-destructive/10 space-y-1.5"
+                                  >
+                                    <div className="flex items-center justify-between gap-2">
+                                      <div className="font-semibold text-xs text-foreground flex items-center gap-2">
+                                        <span className="bg-destructive text-destructive-foreground text-[10px] font-bold px-1.5 py-0.5 rounded uppercase">
+                                          {finding.severity}
+                                        </span>
+                                        <span>{finding.title}</span>
+                                      </div>
+                                      <span className="text-[10px] font-mono text-muted-foreground">
+                                        {finding.type}
+                                      </span>
+                                    </div>
+                                    <p className="text-xs text-muted-foreground">
+                                      {finding.description}
+                                    </p>
+                                    {finding.remediation && (
+                                      <div className="text-[11px] text-emerald-400 bg-background/50 rounded p-1.5 mt-1 border border-border">
+                                        <strong>Remediation:</strong> {finding.remediation}
+                                      </div>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+
+                            {/* Step-by-Step Execution Trace */}
+                            <div className="space-y-2">
+                              <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                                Step Execution Trace ({selectedExecution.step_executions.length})
+                              </div>
+                              <div className="space-y-2">
+                                {selectedExecution.step_executions.map((step) => {
+                                  const isPass = step.status === "PASS";
+                                  const isConfirmed = step.status === "CONFIRMED";
+                                  const isError = step.status === "ERROR";
+                                  const statusColor = isPass
+                                    ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
+                                    : isConfirmed
+                                    ? "bg-destructive/20 text-destructive border-destructive/30"
+                                    : isError
+                                    ? "bg-destructive/20 text-destructive border-destructive/30"
+                                    : "bg-amber-500/20 text-amber-300 border-amber-500/30";
+
+                                  return (
+                                    <div
+                                      key={step.id}
+                                      className="p-3 rounded-lg border border-border bg-card/60 space-y-2"
+                                    >
+                                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                                        <div className="flex items-center gap-2">
+                                          <span className="font-mono text-xs font-bold text-muted-foreground">
+                                            #{step.step_order}
+                                          </span>
+                                          <span className="font-semibold text-xs text-foreground">
+                                            {step.step_name || `Step ${step.step_order}`}
+                                          </span>
+                                          <span className="font-mono text-[11px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                                            {step.http_method} {step.endpoint_path}
+                                          </span>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                          <span
+                                            className={`text-[10px] font-bold px-2 py-0.5 rounded border uppercase ${statusColor}`}
+                                          >
+                                            {step.status}
+                                          </span>
+                                          {step.status_code && (
+                                            <span
+                                              className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${
+                                                step.status_code < 400
+                                                  ? "bg-emerald-500/20 text-emerald-400"
+                                                  : "bg-destructive/20 text-destructive"
+                                              }`}
+                                            >
+                                              {step.status_code}
+                                            </span>
+                                          )}
+                                          <Button
+                                            size="sm"
+                                            variant="outline"
+                                            className="text-[11px] h-7 px-2"
+                                            onClick={() => {
+                                              setSelectedStepEvidence(step);
+                                              setShowEvidenceModal(true);
+                                            }}
+                                          >
+                                            Evidence
+                                          </Button>
+                                        </div>
+                                      </div>
+
+                                      {/* Transition details */}
+                                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px] pt-1 border-t border-border/40 text-muted-foreground">
+                                        <div>
+                                          <span>State Transition: </span>
+                                          <span className="font-semibold text-foreground">
+                                            {step.state_before || "START"} &rarr; {step.state_after || "UNCHANGED"}
+                                          </span>
+                                        </div>
+                                        <div>
+                                          <span>Expected: </span>
+                                          <span className="font-mono text-foreground">
+                                            {step.transition_expected || "N/A"}
+                                          </span>
+                                        </div>
+                                        <div className="sm:text-right">
+                                          <span>Latency: </span>
+                                          <span className="font-mono text-foreground">
+                                            {step.latency_ms !== null ? `${step.latency_ms}ms` : "-"}
+                                          </span>
+                                        </div>
+                                      </div>
+
+                                      {step.error_message && (
+                                        <div className="bg-destructive/10 text-destructive text-[11px] p-2 rounded border border-destructive/20">
+                                          <strong>Error:</strong> {step.error_message}
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="border border-dashed border-border rounded-lg p-12 text-center text-muted-foreground text-xs">
+                            Select an execution from the left to view detailed trace, state transitions, and evidence.
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -1453,6 +2004,86 @@ export default function WorkflowsPage() {
               </Button>
               <Button size="sm" variant="primary" onClick={handleSaveTransition}>
                 {editingTransId ? "Save Transition" : "Add Transition"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Evidence Modal */}
+      {showEvidenceModal && selectedStepEvidence && (
+        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-card border border-border rounded-xl max-w-2xl w-full p-6 space-y-4 shadow-xl my-8">
+            <div className="flex items-center justify-between border-b border-border pb-3">
+              <div>
+                <h3 className="text-base font-bold text-foreground">
+                  Step #{selectedStepEvidence.step_order} Sanitized Evidence
+                </h3>
+                <p className="text-xs text-muted-foreground font-mono mt-0.5">
+                  [{selectedStepEvidence.http_method}] {selectedStepEvidence.endpoint_path}
+                </p>
+              </div>
+              <Button size="sm" variant="outline" onClick={() => setShowEvidenceModal(false)}>
+                Close
+              </Button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 p-2.5 rounded bg-muted/40 border border-border text-[11px]">
+                <div>
+                  <span className="text-muted-foreground block text-[10px]">STATUS CODE</span>
+                  <span className="font-mono font-bold text-foreground">
+                    {selectedStepEvidence.status_code || "-"}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground block text-[10px]">LATENCY</span>
+                  <span className="font-mono text-foreground">
+                    {selectedStepEvidence.latency_ms !== null ? `${selectedStepEvidence.latency_ms}ms` : "-"}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground block text-[10px]">STEP STATUS</span>
+                  <span className="font-semibold uppercase text-foreground">
+                    {selectedStepEvidence.status}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground block text-[10px]">TRANSITION</span>
+                  <span className="font-mono text-foreground truncate block">
+                    {selectedStepEvidence.state_before || "START"} &rarr; {selectedStepEvidence.state_after || "UNCHANGED"}
+                  </span>
+                </div>
+              </div>
+
+              <div>
+                <label className="font-semibold block mb-1 text-muted-foreground">Sanitized Request Summary</label>
+                <pre className="p-3 bg-background border border-input rounded-md text-[11px] font-mono overflow-x-auto max-h-48 text-foreground whitespace-pre-wrap">
+                  {selectedStepEvidence.request_summary
+                    ? JSON.stringify(selectedStepEvidence.request_summary, null, 2)
+                    : "No request summary available"}
+                </pre>
+              </div>
+
+              <div>
+                <label className="font-semibold block mb-1 text-muted-foreground">Sanitized Response Summary</label>
+                <pre className="p-3 bg-background border border-input rounded-md text-[11px] font-mono overflow-x-auto max-h-48 text-foreground whitespace-pre-wrap">
+                  {selectedStepEvidence.response_summary
+                    ? JSON.stringify(selectedStepEvidence.response_summary, null, 2)
+                    : "No response summary available"}
+                </pre>
+              </div>
+
+              {selectedStepEvidence.correlation_id && (
+                <div className="text-[10px] text-muted-foreground font-mono">
+                  Correlation ID: {selectedStepEvidence.correlation_id}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end pt-3 border-t border-border">
+              <Button size="sm" variant="primary" onClick={() => setShowEvidenceModal(false)}>
+                Done
               </Button>
             </div>
           </div>

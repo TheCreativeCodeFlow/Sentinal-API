@@ -390,4 +390,98 @@ def demo_auth_server_error():
     raise HTTPException(status_code=500, detail="Internal Server Error: Database connection failure during auth verification")
 
 
+# ==============================================================================
+# STAGE 7.2: Stateful Workflow Test Endpoints (Orders Domain)
+# ==============================================================================
+
+DEFAULT_WORKFLOW_ORDERS: Dict[str, Dict[str, Any]] = {
+    "order-valid-1": {"state": "CREATED", "vulnerable": False},
+    "order-vuln-1": {"state": "CREATED", "vulnerable": True},
+    "order-protected-1": {"state": "CANCELLED", "vulnerable": False},
+}
+
+DEMO_WORKFLOW_ORDERS: Dict[str, Dict[str, Any]] = {
+    k: dict(v) for k, v in DEFAULT_WORKFLOW_ORDERS.items()
+}
+
+
+@demo_target_router.get(
+    "/workflow/reset",
+    summary="[TEST ONLY] Reset Workflow Test Orders",
+    description="Resets the in-memory order states to their initial fixtures.",
+)
+def demo_workflow_reset():
+    global DEMO_WORKFLOW_ORDERS
+    DEMO_WORKFLOW_ORDERS = {k: dict(v) for k, v in DEFAULT_WORKFLOW_ORDERS.items()}
+    return {"status": "reset", "orders": list(DEMO_WORKFLOW_ORDERS.keys())}
+
+
+@demo_target_router.get(
+    "/workflow/orders/{order_id}/status",
+    summary="[TEST ONLY] Get Order Status",
+    description="Returns current lifecycle state for an order.",
+)
+def demo_workflow_order_status(order_id: str):
+    order = DEMO_WORKFLOW_ORDERS.get(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return {"order_id": order_id, "state": order["state"]}
+
+
+@demo_target_router.get(
+    "/workflow/orders/{order_id}/cancel",
+    summary="[TEST ONLY] Cancel Order Endpoint",
+    description="Cancels an order if CREATED. If already CANCELLED, returns 409 Conflict (or 200 if vulnerable).",
+)
+def demo_workflow_order_cancel(order_id: str):
+    order = DEMO_WORKFLOW_ORDERS.get(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    if order["state"] == "CREATED":
+        order["state"] = "CANCELLED"
+        return {"order_id": order_id, "state": "CANCELLED", "message": "Order cancelled successfully"}
+
+    if order["state"] == "CANCELLED":
+        if order.get("vulnerable"):
+            return {"order_id": order_id, "state": "CANCELLED", "message": "Order re-cancelled (vulnerable)"}
+        raise HTTPException(status_code=409, detail="Order is already cancelled")
+
+    if order.get("vulnerable"):
+        order["state"] = "CANCELLED"
+        return {"order_id": order_id, "state": "CANCELLED"}
+    raise HTTPException(status_code=409, detail=f"Cannot cancel order in state {order['state']}")
+
+
+@demo_target_router.get(
+    "/workflow/orders/{order_id}/refund",
+    summary="[TEST ONLY] Refund Order Endpoint",
+    description="Refunds an order if PAID. If CREATED/CANCELLED, returns 409 Conflict (or 200 if vulnerable logic flaw).",
+)
+def demo_workflow_order_refund(order_id: str):
+    order = DEMO_WORKFLOW_ORDERS.get(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    if order["state"] == "PAID":
+        order["state"] = "REFUNDED"
+        return {"order_id": order_id, "state": "REFUNDED", "message": "Order refunded successfully"}
+
+    # Disallowed transition from CREATED or CANCELLED to REFUNDED
+    if order.get("vulnerable"):
+        # Flawed logic: allows refund without verifying that the order was paid!
+        order["state"] = "REFUNDED"
+        return {
+            "order_id": order_id,
+            "state": "REFUNDED",
+            "message": "Order refunded via flawed state validation bypass",
+        }
+
+    raise HTTPException(
+        status_code=409,
+        detail=f"Cannot refund order in state '{order['state']}'. Only PAID orders can be refunded.",
+    )
+
+
+
 

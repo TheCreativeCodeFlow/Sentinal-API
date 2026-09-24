@@ -291,13 +291,16 @@ class Finding(Base):
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
     project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
-    security_test_id = Column(String(36), ForeignKey("security_tests.id", ondelete="CASCADE"), nullable=False, index=True)
-    execution_id = Column(String(36), ForeignKey("test_executions.id", ondelete="CASCADE"), nullable=False, index=True)
+    security_test_id = Column(String(36), ForeignKey("security_tests.id", ondelete="CASCADE"), nullable=True, index=True)
+    execution_id = Column(String(36), ForeignKey("test_executions.id", ondelete="CASCADE"), nullable=True, index=True)
+    workflow_id = Column(String(36), ForeignKey("workflows.id", ondelete="CASCADE"), nullable=True, index=True)
+    workflow_execution_id = Column(String(36), ForeignKey("workflow_executions.id", ondelete="CASCADE"), nullable=True, index=True)
+    workflow_step_id = Column(String(36), ForeignKey("workflow_steps.id", ondelete="SET NULL"), nullable=True, index=True)
     endpoint_id = Column(Integer, ForeignKey("endpoints.id", ondelete="SET NULL"), nullable=True, index=True)
     attacker_identity_id = Column(String(36), ForeignKey("identities.id", ondelete="SET NULL"), nullable=True, index=True)
     attacker_role_id = Column(String(36), ForeignKey("roles.id", ondelete="SET NULL"), nullable=True, index=True)
     resource_id = Column(String(36), ForeignKey("resources.id", ondelete="SET NULL"), nullable=True, index=True)
-    type = Column(String(50), nullable=False, default="BOLA", index=True)  # BOLA, BFLA, PROPERTY_EXPOSURE
+    type = Column(String(50), nullable=False, default="BOLA", index=True)  # BOLA, BFLA, PROPERTY_EXPOSURE, INVALID_STATE_TRANSITION, etc.
     severity = Column(String(50), nullable=False, default="HIGH", index=True)  # LOW, MEDIUM, HIGH, CRITICAL
     confidence = Column(String(50), nullable=False, default="HIGH")  # LOW, MEDIUM, HIGH
     status = Column(String(50), nullable=False, default="OPEN", index=True)  # OPEN, RESOLVED, FALSE_POSITIVE
@@ -316,6 +319,9 @@ class Finding(Base):
     project = relationship("Project", back_populates="findings")
     security_test = relationship("SecurityTest", back_populates="findings")
     execution = relationship("TestExecution", back_populates="findings")
+    workflow = relationship("Workflow", back_populates="findings")
+    workflow_execution = relationship("WorkflowExecution", back_populates="findings")
+    workflow_step = relationship("WorkflowStep")
     evidence = relationship("Evidence", back_populates="finding", uselist=False)
     endpoint = relationship("Endpoint")
     attacker_identity = relationship("Identity", foreign_keys=[attacker_identity_id])
@@ -325,6 +331,7 @@ class Finding(Base):
     __table_args__ = (
         Index("ix_findings_project_severity", "project_id", "severity"),
         Index("ix_findings_project_type", "project_id", "type"),
+        Index("ix_findings_project_workflow", "project_id", "workflow_id"),
     )
 
 
@@ -332,7 +339,9 @@ class Evidence(Base):
     __tablename__ = "evidence"
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
-    execution_id = Column(String(36), ForeignKey("test_executions.id", ondelete="CASCADE"), nullable=False, index=True)
+    execution_id = Column(String(36), ForeignKey("test_executions.id", ondelete="CASCADE"), nullable=True, index=True)
+    workflow_execution_id = Column(String(36), ForeignKey("workflow_executions.id", ondelete="CASCADE"), nullable=True, index=True)
+    workflow_step_execution_id = Column(String(36), ForeignKey("workflow_step_executions.id", ondelete="CASCADE"), nullable=True, index=True)
     finding_id = Column(String(36), ForeignKey("findings.id", ondelete="SET NULL"), nullable=True, index=True)
     request_metadata = Column(Text, nullable=True)  # JSON-encoded metadata
     response_metadata = Column(Text, nullable=True)  # JSON-encoded metadata
@@ -344,6 +353,8 @@ class Evidence(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     execution = relationship("TestExecution", back_populates="evidence")
+    workflow_execution = relationship("WorkflowExecution", back_populates="evidence")
+    workflow_step_execution = relationship("WorkflowStepExecution", back_populates="evidence")
     finding = relationship("Finding", back_populates="evidence")
 
 
@@ -528,6 +539,17 @@ class Workflow(Base):
         back_populates="workflow",
         cascade="all, delete-orphan",
     )
+    executions = relationship(
+        "WorkflowExecution",
+        back_populates="workflow",
+        cascade="all, delete-orphan",
+        order_by="WorkflowExecution.created_at.desc()",
+    )
+    findings = relationship(
+        "Finding",
+        back_populates="workflow",
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         Index("ix_workflows_project_name", "project_id", "name", unique=True),
@@ -617,4 +639,73 @@ class WorkflowTransition(Base):
 
     __table_args__ = (
         Index("ix_workflow_transitions_unique", "workflow_id", "from_state_id", "to_state_id", "step_id", unique=True),
+    )
+
+
+# ==============================================================================
+# STAGE 7.2: Stateful Workflow Execution Models
+# ==============================================================================
+
+class WorkflowExecution(Base):
+    __tablename__ = "workflow_executions"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    workflow_id = Column(String(36), ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String(50), nullable=False, default="QUEUED", index=True)  # QUEUED, RUNNING, COMPLETED, FAILED
+    result = Column(String(50), nullable=True, index=True)  # PASS, CONFIRMED, INCONCLUSIVE, ERROR
+    result_reason = Column(Text, nullable=True)
+    triggered_by = Column(String(50), nullable=False, default="MANUAL")  # MANUAL, REPLAY
+    current_state_id = Column(String(36), ForeignKey("workflow_states.id", ondelete="SET NULL"), nullable=True, index=True)
+    correlation_id = Column(String(64), nullable=True, index=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    workflow = relationship("Workflow", back_populates="executions")
+    current_state = relationship("WorkflowState")
+    step_executions = relationship(
+        "WorkflowStepExecution",
+        back_populates="workflow_execution",
+        cascade="all, delete-orphan",
+        order_by="WorkflowStepExecution.step_order",
+    )
+    findings = relationship("Finding", back_populates="workflow_execution", cascade="all, delete-orphan")
+    evidence = relationship("Evidence", back_populates="workflow_execution", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("ix_wf_exec_wf_status", "workflow_id", "status"),
+    )
+
+
+class WorkflowStepExecution(Base):
+    __tablename__ = "workflow_step_executions"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    workflow_execution_id = Column(
+        String(36), ForeignKey("workflow_executions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    step_id = Column(String(36), ForeignKey("workflow_steps.id", ondelete="SET NULL"), nullable=True, index=True)
+    step_order = Column(Integer, nullable=False)
+    http_method = Column(String(10), nullable=True)
+    endpoint_path = Column(String(500), nullable=True)
+    status = Column(String(50), nullable=False, default="PENDING")  # PASS, CONFIRMED, INCONCLUSIVE, ERROR, SKIPPED
+    request_summary = Column(JSON, nullable=True)
+    response_summary = Column(JSON, nullable=True)
+    status_code = Column(Integer, nullable=True)
+    latency_ms = Column(Integer, nullable=True)
+    state_before = Column(String(100), nullable=True)
+    state_after = Column(String(100), nullable=True)
+    transition_expected = Column(String(20), nullable=True)  # ALLOW, DENY
+    transition_result = Column(String(50), nullable=True)  # VALID, INVALID_STATE_TRANSITION, UNEXPECTED_STATE
+    correlation_id = Column(String(64), nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    workflow_execution = relationship("WorkflowExecution", back_populates="step_executions")
+    step = relationship("WorkflowStep")
+    evidence = relationship("Evidence", back_populates="workflow_step_execution", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("ix_wf_step_exec_wf_order", "workflow_execution_id", "step_order"),
     )

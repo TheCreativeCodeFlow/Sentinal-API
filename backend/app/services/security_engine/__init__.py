@@ -9,7 +9,7 @@ from app.services.security_engine.bfla_engine import BFLAEngine
 from app.services.security_engine.property_engine import PropertyExposureEngine
 from app.services.security_engine.auth_engine import AuthenticationEngine
 from app.services.security_engine.auth_generator import AuthenticationTestGenerator
-from app.services.security_engine.redactor import redact_headers, redact_text
+from app.services.security_engine.workflow_engine import WorkflowEngine
 
 __all__ = [
     "AsyncSecurityHttpClient",
@@ -19,6 +19,7 @@ __all__ = [
     "PropertyExposureEngine",
     "AuthenticationEngine",
     "AuthenticationTestGenerator",
+    "WorkflowEngine",
     "redact_headers",
     "redact_text",
 ]
