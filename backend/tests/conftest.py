@@ -26,6 +26,8 @@ def db_engine():
         # Drop all tables and indexes completely
         with engine.connect() as conn:
             conn.execute(text("""
+                DROP TABLE IF EXISTS workflow_attack_steps CASCADE;
+                DROP TABLE IF EXISTS workflow_attack_scenarios CASCADE;
                 DROP TABLE IF EXISTS workflow_step_executions CASCADE;
                 DROP TABLE IF EXISTS workflow_executions CASCADE;
                 DROP TABLE IF EXISTS workflow_transitions CASCADE;

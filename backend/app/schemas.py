@@ -346,6 +346,7 @@ class EvidenceInDB(BaseModel):
     execution_id: Optional[str] = None
     workflow_execution_id: Optional[str] = None
     workflow_step_execution_id: Optional[str] = None
+    attack_scenario_id: Optional[str] = None
     finding_id: Optional[str] = None
     request_metadata: Optional[Dict[str, Any]] = None
     response_metadata: Optional[Dict[str, Any]] = None
@@ -384,6 +385,7 @@ class FindingInDB(BaseModel):
     workflow_id: Optional[str] = None
     workflow_execution_id: Optional[str] = None
     workflow_step_id: Optional[str] = None
+    attack_scenario_id: Optional[str] = None
     endpoint_id: Optional[int] = None
     attacker_identity_id: Optional[str] = None
     attacker_role_id: Optional[str] = None
@@ -409,6 +411,8 @@ class FindingInDB(BaseModel):
     victim_resource_instance_id: Optional[str] = None
     workflow_name: Optional[str] = None
     workflow_step_name: Optional[str] = None
+    attack_scenario_name: Optional[str] = None
+    attack_scenario_type: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -815,9 +819,13 @@ class WorkflowStepExecutionInDB(BaseModel):
     id: str
     workflow_execution_id: str
     step_id: Optional[str] = None
+    attack_step_id: Optional[str] = None
     step_order: int
     http_method: Optional[str] = None
     endpoint_path: Optional[str] = None
+    action: Optional[str] = None
+    identity_id: Optional[str] = None
+    identity_name: Optional[str] = None
     status: str  # PASS, CONFIRMED, INCONCLUSIVE, ERROR, SKIPPED
     request_summary: Optional[Dict[str, Any]] = None
     response_summary: Optional[Dict[str, Any]] = None
@@ -838,6 +846,7 @@ class WorkflowStepExecutionInDB(BaseModel):
 class WorkflowExecutionInDB(BaseModel):
     id: str
     workflow_id: str
+    attack_scenario_id: Optional[str] = None
     status: str  # QUEUED, RUNNING, COMPLETED, FAILED
     result: Optional[str] = None  # PASS, CONFIRMED, INCONCLUSIVE, ERROR
     result_reason: Optional[str] = None
@@ -857,5 +866,76 @@ class WorkflowExecutionInDB(BaseModel):
 class WorkflowExecutionDetailInDB(WorkflowExecutionInDB):
     workflow_name: Optional[str] = None
     current_state_name: Optional[str] = None
+    attack_scenario_name: Optional[str] = None
+    attack_scenario_type: Optional[str] = None
     step_executions: List[WorkflowStepExecutionInDB] = []
     findings: List[FindingInDB] = []
+
+
+# ==============================================================================
+# STAGE 7.3: Stateful Attack Scenarios Schemas
+# ==============================================================================
+
+class WorkflowAttackStepBase(BaseModel):
+    position: int = Field(..., ge=1)
+    action: str = Field(..., max_length=50)  # EXECUTE, SKIP, REPLAY, SWITCH_IDENTITY
+    source_step_id: Optional[str] = None
+    identity_id: Optional[str] = None
+    expected_behavior: str = Field("DENY", max_length=50)  # ALLOW, DENY
+    configuration: Optional[Dict[str, Any]] = None
+
+
+class WorkflowAttackStepCreate(WorkflowAttackStepBase):
+    pass
+
+
+class WorkflowAttackStepInDB(WorkflowAttackStepBase):
+    id: str
+    scenario_id: str
+    created_at: datetime
+    source_step_name: Optional[str] = None
+    endpoint_method: Optional[str] = None
+    endpoint_path: Optional[str] = None
+    identity_name: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class WorkflowAttackScenarioBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = Field(None, max_length=2000)
+    scenario_type: str = Field(..., max_length=50)  # INVALID_STATE_TRANSITION, STEP_REPLAY, STEP_SKIP, STEP_REORDER, IDENTITY_SWITCH, CROSS_IDENTITY_CONTINUATION
+    status: str = Field("ACTIVE", max_length=50)  # DRAFT, ACTIVE, DISABLED
+
+
+class WorkflowAttackScenarioCreate(WorkflowAttackScenarioBase):
+    steps: Optional[List[WorkflowAttackStepCreate]] = None
+
+
+class WorkflowAttackScenarioInDB(WorkflowAttackScenarioBase):
+    id: str
+    workflow_id: str
+    created_at: datetime
+    updated_at: datetime
+    step_count: Optional[int] = 0
+    execution_count: Optional[int] = 0
+    findings_count: Optional[int] = 0
+    latest_result: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class WorkflowAttackScenarioDetailInDB(WorkflowAttackScenarioInDB):
+    workflow_name: Optional[str] = None
+    steps: List[WorkflowAttackStepInDB] = []
+    latest_execution: Optional[WorkflowExecutionInDB] = None
+
+
+class WorkflowAttackScenarioGenerateRequest(BaseModel):
+    scenario_types: Optional[List[str]] = None  # None means all supported scenario types
+
+
+class WorkflowAttackScenarioGenerateResult(BaseModel):
+    generated_count: int
+    existing_count: int
+    scenarios: List[WorkflowAttackScenarioInDB] = []

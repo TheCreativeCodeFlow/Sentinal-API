@@ -28,6 +28,8 @@ from app.models import (
     WorkflowTransition,
     WorkflowExecution,
     WorkflowStepExecution,
+    WorkflowAttackScenario,
+    WorkflowAttackStep,
 )
 from app.schemas import (
     ProjectCreate,
@@ -116,6 +118,15 @@ from app.schemas import (
     WorkflowStepExecutionInDB,
     WorkflowExecutionInDB,
     WorkflowExecutionDetailInDB,
+    WorkflowAttackStepBase,
+    WorkflowAttackStepCreate,
+    WorkflowAttackStepInDB,
+    WorkflowAttackScenarioBase,
+    WorkflowAttackScenarioCreate,
+    WorkflowAttackScenarioInDB,
+    WorkflowAttackScenarioDetailInDB,
+    WorkflowAttackScenarioGenerateRequest,
+    WorkflowAttackScenarioGenerateResult,
 )
 from app.services.security_engine.redactor import SENSITIVE_HEADER_NAMES
 
@@ -520,6 +531,9 @@ def format_finding_response(finding: Finding, db: Session) -> FindingInDB:
         victim_resource_instance_id=finding.security_test.victim_resource_instance_id if finding.security_test else None,
         workflow_name=workflow_name,
         workflow_step_name=workflow_step_name,
+        attack_scenario_id=finding.attack_scenario_id,
+        attack_scenario_name=finding.attack_scenario.name if finding.attack_scenario else None,
+        attack_scenario_type=finding.attack_scenario.scenario_type if finding.attack_scenario else None,
     )
 
 
@@ -530,6 +544,8 @@ def format_finding_detail(finding: Finding, db: Session) -> FindingDetail:
         ev = finding.execution.evidence
     if not ev and finding.workflow_execution_id:
         ev = db.query(Evidence).filter(Evidence.workflow_execution_id == finding.workflow_execution_id).first()
+    if not ev and finding.attack_scenario_id:
+        ev = db.query(Evidence).filter(Evidence.attack_scenario_id == finding.attack_scenario_id).first()
     ev_in_db = format_evidence_response(ev)
 
     data = base.model_dump()
@@ -709,9 +725,13 @@ def format_workflow_step_execution_response(step_exec: WorkflowStepExecution) ->
         id=step_exec.id,
         workflow_execution_id=step_exec.workflow_execution_id,
         step_id=step_exec.step_id,
+        attack_step_id=step_exec.attack_step_id,
         step_order=step_exec.step_order,
         http_method=step_exec.http_method,
         endpoint_path=step_exec.endpoint_path,
+        action=step_exec.action,
+        identity_id=step_exec.identity_id,
+        identity_name=step_exec.identity_name,
         status=step_exec.status,
         request_summary=step_exec.request_summary,
         response_summary=step_exec.response_summary,
@@ -734,6 +754,7 @@ def format_workflow_execution_response(execution: WorkflowExecution, db: Session
     return WorkflowExecutionInDB(
         id=execution.id,
         workflow_id=execution.workflow_id,
+        attack_scenario_id=execution.attack_scenario_id,
         status=execution.status,
         result=execution.result,
         result_reason=execution.result_reason,
@@ -760,8 +781,85 @@ def format_workflow_execution_detail(execution: WorkflowExecution, db: Session) 
         **base.model_dump(),
         workflow_name=execution.workflow.name if execution.workflow else None,
         current_state_name=execution.current_state.name if execution.current_state else None,
+        attack_scenario_name=execution.attack_scenario.name if execution.attack_scenario else None,
+        attack_scenario_type=execution.attack_scenario.scenario_type if execution.attack_scenario else None,
         step_executions=step_execs,
         findings=findings,
+    )
+
+
+def get_attack_scenario_or_404(scenario_id: str, db: Session) -> WorkflowAttackScenario:
+    """Helper to get attack scenario or raise 404."""
+    sc = db.query(WorkflowAttackScenario).filter(WorkflowAttackScenario.id == scenario_id).first()
+    if not sc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow attack scenario with id {scenario_id} not found",
+        )
+    return sc
+
+
+def format_workflow_attack_step_response(step: WorkflowAttackStep) -> WorkflowAttackStepInDB:
+    endpoint_method = step.source_step.http_method if step.source_step else None
+    endpoint_path = (
+        step.source_step.endpoint.path
+        if (step.source_step and step.source_step.endpoint)
+        else None
+    )
+    return WorkflowAttackStepInDB(
+        id=step.id,
+        scenario_id=step.scenario_id,
+        source_step_id=step.source_step_id,
+        position=step.position,
+        action=step.action,
+        identity_id=step.identity_id,
+        expected_behavior=step.expected_behavior,
+        configuration=step.configuration,
+        created_at=step.created_at,
+        source_step_name=step.source_step.name if step.source_step else None,
+        endpoint_method=endpoint_method,
+        endpoint_path=endpoint_path,
+        identity_name=step.identity.name if step.identity else None,
+    )
+
+
+def format_workflow_attack_scenario_response(scenario: WorkflowAttackScenario, db: Session) -> WorkflowAttackScenarioInDB:
+    step_count = len(scenario.steps) if scenario.steps else 0
+    execution_count = len(scenario.executions) if scenario.executions else 0
+    findings_count = len(scenario.findings) if scenario.findings else 0
+    latest_result = scenario.executions[0].result if scenario.executions else None
+    return WorkflowAttackScenarioInDB(
+        id=scenario.id,
+        workflow_id=scenario.workflow_id,
+        name=scenario.name,
+        description=scenario.description,
+        scenario_type=scenario.scenario_type,
+        status=scenario.status,
+        created_at=scenario.created_at,
+        updated_at=scenario.updated_at,
+        step_count=step_count,
+        execution_count=execution_count,
+        findings_count=findings_count,
+        latest_result=latest_result,
+    )
+
+
+def format_workflow_attack_scenario_detail(scenario: WorkflowAttackScenario, db: Session) -> WorkflowAttackScenarioDetailInDB:
+    base = format_workflow_attack_scenario_response(scenario, db)
+    steps = [
+        format_workflow_attack_step_response(s)
+        for s in sorted(scenario.steps, key=lambda s: s.position)
+    ]
+    latest_exec = (
+        format_workflow_execution_response(scenario.executions[0], db)
+        if scenario.executions
+        else None
+    )
+    return WorkflowAttackScenarioDetailInDB(
+        **base.model_dump(),
+        workflow_name=scenario.workflow.name if scenario.workflow else None,
+        steps=steps,
+        latest_execution=latest_exec,
     )
 
 
@@ -3886,6 +3984,140 @@ async def replay_workflow_execution_endpoint(
     engine = WorkflowEngine(db=db, app=fastapi_app)
     new_execution = await engine.execute_workflow(workflow, triggered_by="REPLAY")
     return format_workflow_execution_detail(new_execution, db)
+
+
+# ----------------- WORKFLOW ATTACK SCENARIO ENDPOINTS (STAGE 7.3) -----------------
+
+@workflow_router.post(
+    "/workflows/{workflow_id}/generate-attack-scenarios",
+    response_model=WorkflowAttackScenarioGenerateResult,
+)
+def generate_workflow_attack_scenarios(
+    workflow_id: str,
+    gen_req: Optional[WorkflowAttackScenarioGenerateRequest] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Generate safe adversarial test scenarios for an ACTIVE workflow.
+    Generation does NOT execute scenarios.
+    """
+    workflow = get_workflow_or_404(workflow_id, db)
+    project = db.query(Project).filter(Project.id == workflow.project_id).first()
+    if not project or project.authorization_status.lower() != "authorized":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Project must be authorized before generating attack scenarios.",
+        )
+    if workflow.status.upper() != "ACTIVE":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Workflow is in '{workflow.status}' status. Only ACTIVE workflows can generate attack scenarios.",
+        )
+
+    from app.services.security_engine.workflow_attack_generator import WorkflowAttackGenerator
+
+    generator = WorkflowAttackGenerator(db=db)
+    scenario_types = gen_req.scenario_types if gen_req else None
+    try:
+        scenarios = generator.generate_scenarios(workflow, scenario_types=scenario_types)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    formatted_scenarios = [
+        format_workflow_attack_scenario_response(sc, db) for sc in scenarios
+    ]
+    return WorkflowAttackScenarioGenerateResult(
+        generated_count=len(formatted_scenarios),
+        existing_count=0,
+        scenarios=formatted_scenarios,
+    )
+
+
+@workflow_router.get(
+    "/workflows/{workflow_id}/attack-scenarios",
+    response_model=List[WorkflowAttackScenarioDetailInDB],
+)
+def list_workflow_attack_scenarios(
+    workflow_id: str,
+    db: Session = Depends(get_db),
+):
+    """List all attack scenarios for a workflow."""
+    workflow = get_workflow_or_404(workflow_id, db)
+    scenarios = (
+        db.query(WorkflowAttackScenario)
+        .filter(WorkflowAttackScenario.workflow_id == workflow.id)
+        .order_by(WorkflowAttackScenario.created_at.desc())
+        .all()
+    )
+    return [format_workflow_attack_scenario_detail(sc, db) for sc in scenarios]
+
+
+@workflow_router.get(
+    "/workflow-attack-scenarios/{scenario_id}",
+    response_model=WorkflowAttackScenarioDetailInDB,
+)
+def get_workflow_attack_scenario(
+    scenario_id: str,
+    db: Session = Depends(get_db),
+):
+    """Get attack scenario details and steps."""
+    scenario = get_attack_scenario_or_404(scenario_id, db)
+    return format_workflow_attack_scenario_detail(scenario, db)
+
+
+@workflow_router.post(
+    "/workflow-attack-scenarios/{scenario_id}/execute",
+    response_model=WorkflowExecutionDetailInDB,
+)
+async def execute_workflow_attack_scenario(
+    scenario_id: str,
+    db: Session = Depends(get_db),
+):
+    """Execute an adversarial attack scenario safely."""
+    scenario = get_attack_scenario_or_404(scenario_id, db)
+    from app.main import app as fastapi_app
+    from app.services.security_engine.workflow_attack_engine import WorkflowAttackEngine
+
+    engine = WorkflowAttackEngine(db=db, app=fastapi_app)
+    execution = await engine.execute_scenario(scenario, triggered_by="MANUAL")
+    return format_workflow_execution_detail(execution, db)
+
+
+@workflow_router.get(
+    "/workflow-attack-scenarios/{scenario_id}/executions",
+    response_model=List[WorkflowExecutionInDB],
+)
+def list_attack_scenario_executions(
+    scenario_id: str,
+    db: Session = Depends(get_db),
+):
+    """List past executions for a specific attack scenario."""
+    scenario = get_attack_scenario_or_404(scenario_id, db)
+    executions = (
+        db.query(WorkflowExecution)
+        .filter(WorkflowExecution.attack_scenario_id == scenario.id)
+        .order_by(WorkflowExecution.created_at.desc())
+        .all()
+    )
+    return [format_workflow_execution_response(e, db) for e in executions]
+
+
+@workflow_router.post(
+    "/workflow-attack-scenarios/{scenario_id}/replay",
+    response_model=WorkflowExecutionDetailInDB,
+)
+async def replay_workflow_attack_scenario(
+    scenario_id: str,
+    db: Session = Depends(get_db),
+):
+    """Replay an adversarial attack scenario."""
+    scenario = get_attack_scenario_or_404(scenario_id, db)
+    from app.main import app as fastapi_app
+    from app.services.security_engine.workflow_attack_engine import WorkflowAttackEngine
+
+    engine = WorkflowAttackEngine(db=db, app=fastapi_app)
+    execution = await engine.execute_scenario(scenario, triggered_by="REPLAY")
+    return format_workflow_execution_detail(execution, db)
 
 
 

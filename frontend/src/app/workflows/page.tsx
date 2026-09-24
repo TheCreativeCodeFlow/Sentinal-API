@@ -104,6 +104,9 @@ interface WorkflowExecutionItem {
   created_at: string;
   step_count: number;
   findings_count: number;
+  attack_scenario_id?: string | null;
+  attack_scenario_name?: string | null;
+  attack_scenario_type?: string | null;
 }
 
 interface WorkflowStepExecutionItem {
@@ -126,6 +129,10 @@ interface WorkflowStepExecutionItem {
   error_message: string | null;
   created_at: string;
   step_name?: string | null;
+  action?: string | null;
+  identity_id?: string | null;
+  identity_name?: string | null;
+  attack_step_id?: string | null;
 }
 
 interface WorkflowExecutionDetailItem extends WorkflowExecutionItem {
@@ -143,6 +150,51 @@ interface WorkflowExecutionDetailItem extends WorkflowExecutionItem {
     actual_behavior?: string | null;
   }>;
 }
+
+interface WorkflowAttackStepItem {
+  id: string;
+  scenario_id: string;
+  source_step_id: string | null;
+  position: number;
+  action: "EXECUTE" | "SKIP" | "REPLAY" | "SWITCH_IDENTITY";
+  identity_id: string | null;
+  expected_behavior: "ALLOW" | "DENY";
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+  source_step_name?: string | null;
+  identity_name?: string | null;
+  http_method?: string | null;
+  endpoint_path?: string | null;
+}
+
+interface WorkflowAttackScenarioItem {
+  id: string;
+  workflow_id: string;
+  name: string;
+  description: string | null;
+  scenario_type:
+    | "INVALID_STATE_TRANSITION"
+    | "STEP_REPLAY"
+    | "STEP_SKIP"
+    | "STEP_REORDER"
+    | "IDENTITY_SWITCH"
+    | "CROSS_IDENTITY_CONTINUATION";
+  status: "DRAFT" | "ACTIVE" | "DISABLED";
+  step_count: number;
+  executions_count: number;
+  latest_result: "PASS" | "CONFIRMED" | "INCONCLUSIVE" | "ERROR" | null;
+  latest_executed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface WorkflowAttackScenarioDetailItem extends WorkflowAttackScenarioItem {
+  workflow_name?: string | null;
+  steps: WorkflowAttackStepItem[];
+  executions: WorkflowExecutionItem[];
+}
+
 
 export default function WorkflowsPage() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -163,13 +215,22 @@ export default function WorkflowsPage() {
   const [showEvidenceModal, setShowEvidenceModal] = useState(false);
   const [selectedStepEvidence, setSelectedStepEvidence] = useState<WorkflowStepExecutionItem | null>(null);
 
+  // Stage 7.3 Attack Scenarios state
+  const [attackScenarios, setAttackScenarios] = useState<WorkflowAttackScenarioItem[]>([]);
+  const [selectedScenarioId, setSelectedScenarioId] = useState<string | null>(null);
+  const [selectedScenarioDetail, setSelectedScenarioDetail] = useState<WorkflowAttackScenarioDetailItem | null>(null);
+  const [generatingScenarios, setGeneratingScenarios] = useState(false);
+  const [executingScenario, setExecutingScenario] = useState(false);
+  const [replayingScenario, setReplayingScenario] = useState(false);
+  const [loadingScenarioDetail, setLoadingScenarioDetail] = useState(false);
+
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
   // Active view tab
-  const [activeTab, setActiveTab] = useState<"steps" | "states" | "transitions" | "executions">("steps");
+  const [activeTab, setActiveTab] = useState<"steps" | "states" | "transitions" | "executions" | "scenarios">("steps");
 
   // Modals state
   const [showWfModal, setShowWfModal] = useState(false);
@@ -340,10 +401,13 @@ export default function WorkflowsPage() {
 
   useEffect(() => {
     let ignore = false;
-    async function fetchExecutions() {
+    async function fetchWorkflowRelated() {
       if (!selectedWorkflowId) {
         setExecutions([]);
         setSelectedExecution(null);
+        setAttackScenarios([]);
+        setSelectedScenarioId(null);
+        setSelectedScenarioDetail(null);
         return;
       }
       try {
@@ -364,8 +428,30 @@ export default function WorkflowsPage() {
       } catch {
         // non-critical
       }
+
+      try {
+        const scRes = await fetch(`/api/v1/workflows/${selectedWorkflowId}/attack-scenarios`, { credentials: "include" });
+        if (scRes.ok && !ignore) {
+          const scData: WorkflowAttackScenarioItem[] = await scRes.json();
+          setAttackScenarios(scData);
+          if (scData.length > 0) {
+            const firstId = scData[0].id;
+            setSelectedScenarioId(firstId);
+            const dtRes = await fetch(`/api/v1/workflow-attack-scenarios/${firstId}`, { credentials: "include" });
+            if (dtRes.ok && !ignore) {
+              const dtData: WorkflowAttackScenarioDetailItem = await dtRes.json();
+              setSelectedScenarioDetail(dtData);
+            }
+          } else {
+            setSelectedScenarioId(null);
+            setSelectedScenarioDetail(null);
+          }
+        }
+      } catch {
+        // non-critical
+      }
     }
-    fetchExecutions();
+    fetchWorkflowRelated();
     return () => {
       ignore = true;
     };
@@ -422,6 +508,132 @@ export default function WorkflowsPage() {
       setErrorMsg(err instanceof Error ? err.message : "Failed to replay execution");
     } finally {
       setReplaying(false);
+    }
+  };
+
+  // Stage 7.3 Load Attack Scenarios
+  const loadAttackScenarios = async (wfId: string) => {
+    try {
+      const res = await fetch(`/api/v1/workflows/${wfId}/attack-scenarios`, { credentials: "include" });
+      if (res.ok) {
+        const data: WorkflowAttackScenarioItem[] = await res.json();
+        setAttackScenarios(data);
+        if (data.length > 0) {
+          const targetId = selectedScenarioId && data.some((s) => s.id === selectedScenarioId)
+            ? selectedScenarioId
+            : data[0].id;
+          setSelectedScenarioId(targetId);
+          await loadScenarioDetail(targetId);
+        } else {
+          setSelectedScenarioId(null);
+          setSelectedScenarioDetail(null);
+        }
+      }
+    } catch {
+      // non-critical
+    }
+  };
+
+  const loadScenarioDetail = async (scId: string) => {
+    try {
+      setLoadingScenarioDetail(true);
+      const res = await fetch(`/api/v1/workflow-attack-scenarios/${scId}`, { credentials: "include" });
+      if (res.ok) {
+        const data: WorkflowAttackScenarioDetailItem = await res.json();
+        setSelectedScenarioDetail(data);
+        if (data.executions && data.executions.length > 0) {
+          await loadExecutionDetail(data.executions[0].id);
+        }
+      }
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : "Failed to load scenario detail");
+    } finally {
+      setLoadingScenarioDetail(false);
+    }
+  };
+
+  const handleGenerateScenarios = async () => {
+    if (!selectedWorkflowId) return;
+    try {
+      setGeneratingScenarios(true);
+      setErrorMsg(null);
+      setSuccessMsg(null);
+      const res = await fetch(`/api/v1/workflows/${selectedWorkflowId}/generate-attack-scenarios`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || "Failed to generate attack scenarios");
+      }
+      const data = await res.json();
+      setSuccessMsg(`Generated ${data.created_count} scenarios (${data.skipped_count} skipped/existing).`);
+      await loadAttackScenarios(selectedWorkflowId);
+      setActiveTab("scenarios");
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : "Failed to generate attack scenarios");
+    } finally {
+      setGeneratingScenarios(false);
+    }
+  };
+
+  const handleExecuteScenario = async (scId: string) => {
+    try {
+      setExecutingScenario(true);
+      setErrorMsg(null);
+      setSuccessMsg(null);
+      const res = await fetch(`/api/v1/workflow-attack-scenarios/${scId}/execute`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || "Failed to execute attack scenario");
+      }
+      const data = await res.json();
+      if (data.execution) {
+        setSelectedExecution(data.execution);
+      }
+      setSuccessMsg(`Attack Scenario executed: ${data.result} (${data.result_reason || ""})`);
+      if (selectedWorkflowId) {
+        await loadAttackScenarios(selectedWorkflowId);
+        await loadExecutions(selectedWorkflowId);
+      }
+      await loadScenarioDetail(scId);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : "Failed to execute attack scenario");
+    } finally {
+      setExecutingScenario(false);
+    }
+  };
+
+  const handleReplayScenario = async (scId: string) => {
+    try {
+      setReplayingScenario(true);
+      setErrorMsg(null);
+      setSuccessMsg(null);
+      const res = await fetch(`/api/v1/workflow-attack-scenarios/${scId}/replay`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || "Failed to replay scenario");
+      }
+      const data = await res.json();
+      if (data.execution) {
+        setSelectedExecution(data.execution);
+      }
+      setSuccessMsg(`Attack Scenario replayed: ${data.result}`);
+      if (selectedWorkflowId) {
+        await loadAttackScenarios(selectedWorkflowId);
+        await loadExecutions(selectedWorkflowId);
+      }
+      await loadScenarioDetail(scId);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : "Failed to replay scenario");
+    } finally {
+      setReplayingScenario(false);
     }
   };
 
@@ -826,7 +1038,7 @@ export default function WorkflowsPage() {
             Stateful Workflows & Business Logic Engine
           </h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Model multi-step API sequences, business states, and execute stateful authorization workflows (Stage 7.2)
+            Model multi-step API sequences, business states, execute workflows, and simulate adversarial attack scenarios (Stage 7.3)
           </p>
         </div>
 
@@ -850,12 +1062,12 @@ export default function WorkflowsPage() {
         </div>
       </div>
 
-      {/* Stage 7.2 Safety & Execution Banner */}
-      <div className="rounded-lg border border-blue-500/30 bg-blue-500/10 p-4 text-xs leading-relaxed text-blue-300">
+      {/* Stage 7.3 Safety & Execution Banner */}
+      <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-xs leading-relaxed text-amber-300">
         <div className="flex items-start gap-2">
           <span className="text-base font-bold">🛡️</span>
           <div>
-            <strong className="font-semibold text-blue-200">Stage 7.2 Stateful Execution Engine Active:</strong> Safely executes defined workflows against target endpoints using non-destructive GET/HEAD requests. Tracks business state transitions across steps, sanitizes evidence, verifies transition invariants, and flags invalid state transitions or unexpected states as findings.
+            <strong className="font-semibold text-amber-200">Stage 7.3 Stateful Attack Scenarios Engine Active:</strong> Safely generates and executes controlled adversarial test scenarios (Step Skip, Step Replay, Step Reorder, Identity Switch, Cross-Identity Continuation, and Invalid State Transitions) using non-destructive GET/HEAD requests. Replay and sanitized evidence chains ensure complete auditability.
           </div>
         </div>
       </div>
@@ -1007,6 +1219,32 @@ export default function WorkflowsPage() {
                     <Button
                       size="sm"
                       variant="outline"
+                      disabled={generatingScenarios || workflowDetail.status !== "ACTIVE" || activeProject?.authorization_status !== "authorized"}
+                      onClick={handleGenerateScenarios}
+                      className="border-amber-500/40 text-amber-400 hover:bg-amber-500/10 hover:text-amber-300 font-medium"
+                      title={
+                        activeProject?.authorization_status !== "authorized"
+                          ? "Project must be authorized before generating attack scenarios"
+                          : workflowDetail.status !== "ACTIVE"
+                          ? "Workflow must be ACTIVE to generate attack scenarios"
+                          : "Automatically generate adversarial attack scenarios"
+                      }
+                    >
+                      {generatingScenarios ? (
+                        <span className="flex items-center gap-1.5">
+                          <span className="inline-block w-3 h-3 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
+                          Generating...
+                        </span>
+                      ) : (
+                        <span className="flex items-center gap-1.5">
+                          <span>⚡</span>
+                          Generate Attacks
+                        </span>
+                      )}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
                       onClick={() => handleOpenEditWf(workflowDetail)}
                     >
                       Edit Workflow
@@ -1062,6 +1300,17 @@ export default function WorkflowsPage() {
                     }`}
                   >
                     Execution History ({executions.length})
+                  </button>
+                  <button
+                    onClick={() => setActiveTab("scenarios")}
+                    className={`px-4 py-2 text-xs font-semibold border-b-2 transition-colors flex items-center gap-1.5 ${
+                      activeTab === "scenarios"
+                        ? "border-amber-500 text-amber-400"
+                        : "border-transparent text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    <span>⚡</span>
+                    Attack Scenarios ({attackScenarios.length})
                   </button>
                 </div>
               </Card>
@@ -1659,6 +1908,523 @@ export default function WorkflowsPage() {
                         ) : (
                           <div className="border border-dashed border-border rounded-lg p-12 text-center text-muted-foreground text-xs">
                             Select an execution from the left to view detailed trace, state transitions, and evidence.
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Tab 5: Attack Scenarios (Stage 7.3) */}
+              {activeTab === "scenarios" && (
+                <div className="space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-muted/20 border border-border p-4 rounded-xl">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-amber-400 text-base">⚡</span>
+                        <h3 className="text-base font-semibold text-foreground">
+                          Adversarial Attack Scenarios
+                        </h3>
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                          Stage 7.3
+                        </span>
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Automated simulation of sequence anomalies (step skipping, replay, reordering, identity switching, invalid state transitions) using non-destructive GET/HEAD requests.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={generatingScenarios || workflowDetail.status !== "ACTIVE" || activeProject?.authorization_status !== "authorized"}
+                        onClick={handleGenerateScenarios}
+                        className="border-amber-500/40 text-amber-400 hover:bg-amber-500/10 hover:text-amber-300 font-medium"
+                      >
+                        {generatingScenarios ? (
+                          <span className="flex items-center gap-1.5">
+                            <span className="inline-block w-3 h-3 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
+                            Generating...
+                          </span>
+                        ) : (
+                          <span className="flex items-center gap-1.5">
+                            <span>⚡</span>
+                            Generate Scenarios
+                          </span>
+                        )}
+                      </Button>
+                    </div>
+                  </div>
+
+                  {/* Summary Counters */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div className="bg-card border border-border rounded-lg p-3">
+                      <span className="text-[10px] uppercase text-muted-foreground block font-bold">Total Scenarios</span>
+                      <span className="text-xl font-bold text-foreground">{attackScenarios.length}</span>
+                    </div>
+                    <div className="bg-card border border-destructive/30 rounded-lg p-3">
+                      <span className="text-[10px] uppercase text-destructive block font-bold">Vulnerabilities (Confirmed)</span>
+                      <span className="text-xl font-bold text-destructive">
+                        {attackScenarios.filter((s) => s.latest_result === "CONFIRMED").length}
+                      </span>
+                    </div>
+                    <div className="bg-card border border-emerald-500/30 rounded-lg p-3">
+                      <span className="text-[10px] uppercase text-emerald-400 block font-bold">Protected (Passed)</span>
+                      <span className="text-xl font-bold text-emerald-400">
+                        {attackScenarios.filter((s) => s.latest_result === "PASS").length}
+                      </span>
+                    </div>
+                    <div className="bg-card border border-amber-500/30 rounded-lg p-3">
+                      <span className="text-[10px] uppercase text-amber-400 block font-bold">Inconclusive / Other</span>
+                      <span className="text-xl font-bold text-amber-400">
+                        {attackScenarios.filter((s) => s.latest_result === "INCONCLUSIVE" || s.latest_result === "ERROR").length}
+                      </span>
+                    </div>
+                  </div>
+
+                  {attackScenarios.length === 0 ? (
+                    <div className="border border-dashed border-border rounded-lg p-10 text-center space-y-3">
+                      <div className="text-2xl">⚡</div>
+                      <div className="font-semibold text-foreground text-sm">No Attack Scenarios Generated Yet</div>
+                      <p className="text-xs text-muted-foreground max-w-md mx-auto">
+                        SentinelAPI generates safe adversarial test cases based on your defined workflow steps, transitions, and configured identities.
+                      </p>
+                      <Button
+                        size="sm"
+                        disabled={generatingScenarios || workflowDetail.status !== "ACTIVE" || activeProject?.authorization_status !== "authorized"}
+                        onClick={handleGenerateScenarios}
+                        className="bg-amber-600 hover:bg-amber-500 text-white font-medium"
+                      >
+                        {generatingScenarios ? "Generating..." : "Generate Attack Scenarios Now"}
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+                      {/* Left Column: Attack Scenarios List */}
+                      <div className="lg:col-span-4 space-y-2">
+                        <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">
+                          Scenarios ({attackScenarios.length})
+                        </div>
+                        <div className="space-y-2 max-h-[750px] overflow-y-auto pr-1">
+                          {attackScenarios.map((sc) => {
+                            const isSelected = selectedScenarioId === sc.id;
+                            const typeColor =
+                              sc.scenario_type === "STEP_SKIP"
+                                ? "bg-purple-500/20 text-purple-300 border-purple-500/30"
+                                : sc.scenario_type === "STEP_REPLAY"
+                                ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/30"
+                                : sc.scenario_type === "STEP_REORDER"
+                                ? "bg-blue-500/20 text-blue-300 border-blue-500/30"
+                                : sc.scenario_type === "IDENTITY_SWITCH"
+                                ? "bg-orange-500/20 text-orange-300 border-orange-500/30"
+                                : sc.scenario_type === "CROSS_IDENTITY_CONTINUATION"
+                                ? "bg-amber-500/20 text-amber-300 border-amber-500/30"
+                                : "bg-rose-500/20 text-rose-300 border-rose-500/30";
+
+                            const resultBadge =
+                              sc.latest_result === "CONFIRMED" ? (
+                                <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-destructive/20 text-destructive border border-destructive/30 uppercase">
+                                  Vulnerable
+                                </span>
+                              ) : sc.latest_result === "PASS" ? (
+                                <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 uppercase">
+                                  Protected
+                                </span>
+                              ) : sc.latest_result === "INCONCLUSIVE" ? (
+                                <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 uppercase">
+                                  Inconclusive
+                                </span>
+                              ) : (
+                                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-muted text-muted-foreground uppercase">
+                                  Not Run
+                                </span>
+                              );
+
+                            return (
+                              <div
+                                key={sc.id}
+                                onClick={() => {
+                                  setSelectedScenarioId(sc.id);
+                                  loadScenarioDetail(sc.id);
+                                }}
+                                className={`p-3 rounded-lg border text-left cursor-pointer transition-all ${
+                                  isSelected
+                                    ? "border-amber-500 bg-accent/40 shadow-xs"
+                                    : "border-border hover:bg-card/60"
+                                }`}
+                              >
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="font-semibold text-xs text-foreground truncate">
+                                    {sc.name}
+                                  </div>
+                                  {resultBadge}
+                                </div>
+                                <div className="flex items-center gap-2 mt-2">
+                                  <span className={`text-[9px] font-bold font-mono px-1.5 py-0.5 rounded border uppercase ${typeColor}`}>
+                                    {sc.scenario_type.replace(/_/g, " ")}
+                                  </span>
+                                  <span className="text-[11px] text-muted-foreground">
+                                    {sc.step_count} step{sc.step_count !== 1 ? "s" : ""}
+                                  </span>
+                                </div>
+                                {sc.latest_executed_at && (
+                                  <div className="text-[10px] text-muted-foreground mt-2 pt-1.5 border-t border-border/40">
+                                    Last run: {new Date(sc.latest_executed_at).toLocaleTimeString()}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Right Column: Scenario Details, Visual Stepper & Findings */}
+                      <div className="lg:col-span-8 space-y-4">
+                        {loadingScenarioDetail && (
+                          <div className="text-center py-12 text-sm text-muted-foreground">
+                            Loading scenario details...
+                          </div>
+                        )}
+
+                        {!loadingScenarioDetail && selectedScenarioDetail ? (
+                          <div className="space-y-4">
+                            {/* Scenario Header Card */}
+                            <Card className="space-y-3">
+                              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                                <div>
+                                  <div className="flex items-center gap-2">
+                                    <h4 className="text-base font-bold text-foreground">
+                                      {selectedScenarioDetail.name}
+                                    </h4>
+                                    <span
+                                      className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase ${
+                                        selectedScenarioDetail.status === "ACTIVE"
+                                          ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                                          : "bg-muted text-muted-foreground"
+                                      }`}
+                                    >
+                                      {selectedScenarioDetail.status}
+                                    </span>
+                                  </div>
+                                  <div className="text-xs text-muted-foreground mt-1">
+                                    {selectedScenarioDetail.description || "No description provided."}
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-2 shrink-0">
+                                  <Button
+                                    size="sm"
+                                    disabled={
+                                      executingScenario ||
+                                      selectedScenarioDetail.status !== "ACTIVE" ||
+                                      workflowDetail.status !== "ACTIVE" ||
+                                      activeProject?.authorization_status !== "authorized"
+                                    }
+                                    onClick={() => handleExecuteScenario(selectedScenarioDetail.id)}
+                                    className="bg-amber-600 hover:bg-amber-500 text-white font-medium"
+                                  >
+                                    {executingScenario ? (
+                                      <span className="flex items-center gap-1.5">
+                                        <span className="inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                        Executing...
+                                      </span>
+                                    ) : (
+                                      <span className="flex items-center gap-1.5">
+                                        <span>▶</span>
+                                        Execute Attack Scenario
+                                      </span>
+                                    )}
+                                  </Button>
+                                  {selectedScenarioDetail.executions && selectedScenarioDetail.executions.length > 0 && (
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      disabled={replayingScenario}
+                                      onClick={() => handleReplayScenario(selectedScenarioDetail.id)}
+                                    >
+                                      {replayingScenario ? "Replaying..." : "↻ Replay"}
+                                    </Button>
+                                  )}
+                                </div>
+                              </div>
+                            </Card>
+
+                            {/* Adversarial Attack Sequence Walkthrough */}
+                            <div className="space-y-2">
+                              <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                                Adversarial Attack Sequence ({selectedScenarioDetail.steps.length} Steps)
+                              </div>
+                              <div className="space-y-2">
+                                {selectedScenarioDetail.steps.map((st) => {
+                                  const isSkip = st.action === "SKIP";
+                                  const isReplay = st.action === "REPLAY";
+                                  const isSwitch = st.action === "SWITCH_IDENTITY";
+
+                                  const actionBadgeClass = isSkip
+                                    ? "bg-rose-500/20 text-rose-300 border-rose-500/30"
+                                    : isReplay
+                                    ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/30"
+                                    : isSwitch
+                                    ? "bg-amber-500/20 text-amber-300 border-amber-500/30"
+                                    : "bg-emerald-500/20 text-emerald-300 border-emerald-500/30";
+
+                                  return (
+                                    <div
+                                      key={st.id}
+                                      className={`p-3 rounded-lg border bg-card/60 space-y-1.5 ${
+                                        isSkip ? "border-rose-500/40 opacity-80" : "border-border"
+                                      }`}
+                                    >
+                                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                                        <div className="flex items-center gap-2">
+                                          <span className="font-mono text-xs font-bold text-muted-foreground">
+                                            #{st.position}
+                                          </span>
+                                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded border uppercase ${actionBadgeClass}`}>
+                                            {st.action}
+                                          </span>
+                                          <span
+                                            className={`font-semibold text-xs ${
+                                              isSkip ? "line-through text-muted-foreground" : "text-foreground"
+                                            }`}
+                                          >
+                                            {st.source_step_name || `Step ${st.position}`}
+                                          </span>
+                                          {st.http_method && st.endpoint_path && (
+                                            <span className="font-mono text-[11px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                                              {st.http_method} {st.endpoint_path}
+                                            </span>
+                                          )}
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                          <span className="text-[11px] text-muted-foreground">
+                                            Expected:{" "}
+                                            <strong
+                                              className={st.expected_behavior === "DENY" ? "text-amber-400" : "text-emerald-400"}
+                                            >
+                                              {st.expected_behavior}
+                                            </strong>
+                                          </span>
+                                          {st.identity_name && (
+                                            <span className="text-[11px] bg-background/60 border border-border px-2 py-0.5 rounded text-foreground">
+                                              Identity: {st.identity_name}
+                                            </span>
+                                          )}
+                                        </div>
+                                      </div>
+                                      {st.description && (
+                                        <p className="text-xs text-muted-foreground">
+                                          {st.description}
+                                        </p>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+
+                            {/* Execution Results & Findings (if executed) */}
+                            {selectedScenarioDetail.executions && selectedScenarioDetail.executions.length > 0 && selectedExecution && (
+                              <div className="space-y-4 pt-3 border-t border-border">
+                                <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                                  Latest Attack Execution Results
+                                </div>
+
+                                {/* Status Banner */}
+                                {selectedExecution.result === "CONFIRMED" ? (
+                                  <div className="p-4 rounded-xl border border-destructive/50 bg-destructive/10 space-y-1">
+                                    <div className="flex items-center gap-2 text-destructive font-bold text-sm">
+                                      <span>⚠️</span>
+                                      VULNERABILITY CONFIRMED
+                                    </div>
+                                    <p className="text-xs text-destructive/90">
+                                      {selectedExecution.result_reason || "The target API permitted an unauthorized sequence or identity transition."}
+                                    </p>
+                                  </div>
+                                ) : selectedExecution.result === "PASS" ? (
+                                  <div className="p-4 rounded-xl border border-emerald-500/50 bg-emerald-500/10 space-y-1">
+                                    <div className="flex items-center gap-2 text-emerald-400 font-bold text-sm">
+                                      <span>✅</span>
+                                      SYSTEM PROTECTED
+                                    </div>
+                                    <p className="text-xs text-emerald-300/90">
+                                      {selectedExecution.result_reason || "The target API properly rejected the invalid workflow transition or identity tampering."}
+                                    </p>
+                                  </div>
+                                ) : (
+                                  <div className="p-4 rounded-xl border border-amber-500/50 bg-amber-500/10 space-y-1">
+                                    <div className="flex items-center gap-2 text-amber-400 font-bold text-sm">
+                                      <span>⚠️</span>
+                                      INCONCLUSIVE EXECUTION
+                                    </div>
+                                    <p className="text-xs text-amber-300/90">
+                                      {selectedExecution.result_reason || "Execution completed with inconclusive status."}
+                                    </p>
+                                  </div>
+                                )}
+
+                                {/* Findings Block */}
+                                {selectedExecution.findings && selectedExecution.findings.length > 0 && (
+                                  <div className="space-y-2">
+                                    <div className="text-xs font-semibold text-destructive uppercase tracking-wider flex items-center gap-1.5">
+                                      <span>⚠️</span>
+                                      Detected Findings ({selectedExecution.findings.length})
+                                    </div>
+                                    {selectedExecution.findings.map((f) => (
+                                      <div
+                                        key={f.id}
+                                        className="p-3.5 rounded-lg border border-destructive/40 bg-destructive/10 space-y-1.5"
+                                      >
+                                        <div className="flex items-center justify-between gap-2">
+                                          <div className="font-semibold text-xs text-foreground flex items-center gap-2">
+                                            <span className="bg-destructive text-destructive-foreground text-[10px] font-bold px-1.5 py-0.5 rounded uppercase">
+                                              {f.severity}
+                                            </span>
+                                            <span>{f.title}</span>
+                                          </div>
+                                          <span className="text-[10px] font-mono text-muted-foreground">
+                                            {f.type}
+                                          </span>
+                                        </div>
+                                        <p className="text-xs text-muted-foreground">
+                                          {f.description}
+                                        </p>
+                                        {f.expected_authorization && f.actual_behavior && (
+                                          <div className="grid grid-cols-2 gap-2 text-[11px] pt-1 text-muted-foreground">
+                                            <div>
+                                              Expected: <code className="text-foreground">{f.expected_authorization}</code>
+                                            </div>
+                                            <div>
+                                              Actual: <code className="text-destructive">{f.actual_behavior}</code>
+                                            </div>
+                                          </div>
+                                        )}
+                                        {f.remediation && (
+                                          <div className="text-[11px] text-emerald-400 bg-background/50 rounded p-1.5 mt-1 border border-border">
+                                            <strong>Remediation:</strong> {f.remediation}
+                                          </div>
+                                        )}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+
+                                {/* Step Execution Trace with Violating Step Highlight */}
+                                <div className="space-y-2">
+                                  <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                                    Execution Trace Evidence ({selectedExecution.step_executions.length})
+                                  </div>
+                                  <div className="space-y-2">
+                                    {selectedExecution.step_executions.map((step) => {
+                                      const isViolating = step.status === "CONFIRMED";
+                                      const isPass = step.status === "PASS";
+                                      const isSkipped = step.status === "SKIPPED";
+
+                                      return (
+                                        <div
+                                          key={step.id}
+                                          className={`p-3 rounded-lg border transition-all ${
+                                            isViolating
+                                              ? "border-destructive bg-destructive/10 ring-1 ring-destructive/40 shadow-xs"
+                                              : isSkipped
+                                              ? "border-border bg-card/30 opacity-70"
+                                              : "border-border bg-card/60"
+                                          }`}
+                                        >
+                                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                                            <div className="flex items-center gap-2">
+                                              <span className="font-mono text-xs font-bold text-muted-foreground">
+                                                #{step.step_order}
+                                              </span>
+                                              {step.action && (
+                                                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-muted text-muted-foreground uppercase">
+                                                  {step.action}
+                                                </span>
+                                              )}
+                                              <span className="font-semibold text-xs text-foreground">
+                                                {step.step_name || `Step ${step.step_order}`}
+                                              </span>
+                                              {step.http_method && step.endpoint_path && (
+                                                <span className="font-mono text-[11px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                                                  {step.http_method} {step.endpoint_path}
+                                                </span>
+                                              )}
+                                              {isViolating && (
+                                                <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-destructive text-white uppercase animate-pulse">
+                                                  Violating Step
+                                                </span>
+                                              )}
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                              <span
+                                                className={`text-[10px] font-bold px-2 py-0.5 rounded border uppercase ${
+                                                  isPass
+                                                    ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
+                                                    : isViolating
+                                                    ? "bg-destructive/20 text-destructive border-destructive/30"
+                                                    : isSkipped
+                                                    ? "bg-zinc-500/20 text-zinc-400 border-zinc-500/30"
+                                                    : "bg-amber-500/20 text-amber-300 border-amber-500/30"
+                                                }`}
+                                              >
+                                                {step.status}
+                                              </span>
+                                              {step.status_code && (
+                                                <span
+                                                  className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${
+                                                    step.status_code < 400
+                                                      ? "bg-emerald-500/20 text-emerald-400"
+                                                      : "bg-destructive/20 text-destructive"
+                                                  }`}
+                                                >
+                                                  {step.status_code}
+                                                </span>
+                                              )}
+                                              <Button
+                                                size="sm"
+                                                variant="outline"
+                                                className="text-[11px] h-7 px-2"
+                                                onClick={() => {
+                                                  setSelectedStepEvidence(step);
+                                                  setShowEvidenceModal(true);
+                                                }}
+                                              >
+                                                Sanitized Evidence
+                                              </Button>
+                                            </div>
+                                          </div>
+
+                                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px] pt-1.5 mt-1 border-t border-border/40 text-muted-foreground">
+                                            <div>
+                                              <span>Transition: </span>
+                                              <span className="font-semibold text-foreground">
+                                                {step.state_before || "START"} &rarr; {step.state_after || "UNCHANGED"}
+                                              </span>
+                                            </div>
+                                            <div>
+                                              <span>Expected: </span>
+                                              <span className="font-mono text-foreground">
+                                                {step.transition_expected || "N/A"}
+                                              </span>
+                                            </div>
+                                            <div className="sm:text-right">
+                                              <span>Latency: </span>
+                                              <span className="font-mono text-foreground">
+                                                {step.latency_ms !== null ? `${step.latency_ms}ms` : "-"}
+                                              </span>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="border border-dashed border-border rounded-lg p-12 text-center text-muted-foreground text-xs">
+                            Select an attack scenario from the list to view its step sequence, configure executions, and analyze findings.
                           </div>
                         )}
                       </div>

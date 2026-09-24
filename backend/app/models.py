@@ -296,6 +296,7 @@ class Finding(Base):
     workflow_id = Column(String(36), ForeignKey("workflows.id", ondelete="CASCADE"), nullable=True, index=True)
     workflow_execution_id = Column(String(36), ForeignKey("workflow_executions.id", ondelete="CASCADE"), nullable=True, index=True)
     workflow_step_id = Column(String(36), ForeignKey("workflow_steps.id", ondelete="SET NULL"), nullable=True, index=True)
+    attack_scenario_id = Column(String(36), ForeignKey("workflow_attack_scenarios.id", ondelete="CASCADE"), nullable=True, index=True)
     endpoint_id = Column(Integer, ForeignKey("endpoints.id", ondelete="SET NULL"), nullable=True, index=True)
     attacker_identity_id = Column(String(36), ForeignKey("identities.id", ondelete="SET NULL"), nullable=True, index=True)
     attacker_role_id = Column(String(36), ForeignKey("roles.id", ondelete="SET NULL"), nullable=True, index=True)
@@ -322,6 +323,7 @@ class Finding(Base):
     workflow = relationship("Workflow", back_populates="findings")
     workflow_execution = relationship("WorkflowExecution", back_populates="findings")
     workflow_step = relationship("WorkflowStep")
+    attack_scenario = relationship("WorkflowAttackScenario", back_populates="findings")
     evidence = relationship("Evidence", back_populates="finding", uselist=False)
     endpoint = relationship("Endpoint")
     attacker_identity = relationship("Identity", foreign_keys=[attacker_identity_id])
@@ -332,6 +334,7 @@ class Finding(Base):
         Index("ix_findings_project_severity", "project_id", "severity"),
         Index("ix_findings_project_type", "project_id", "type"),
         Index("ix_findings_project_workflow", "project_id", "workflow_id"),
+        Index("ix_findings_attack_scenario", "attack_scenario_id"),
     )
 
 
@@ -342,6 +345,7 @@ class Evidence(Base):
     execution_id = Column(String(36), ForeignKey("test_executions.id", ondelete="CASCADE"), nullable=True, index=True)
     workflow_execution_id = Column(String(36), ForeignKey("workflow_executions.id", ondelete="CASCADE"), nullable=True, index=True)
     workflow_step_execution_id = Column(String(36), ForeignKey("workflow_step_executions.id", ondelete="CASCADE"), nullable=True, index=True)
+    attack_scenario_id = Column(String(36), ForeignKey("workflow_attack_scenarios.id", ondelete="CASCADE"), nullable=True, index=True)
     finding_id = Column(String(36), ForeignKey("findings.id", ondelete="SET NULL"), nullable=True, index=True)
     request_metadata = Column(Text, nullable=True)  # JSON-encoded metadata
     response_metadata = Column(Text, nullable=True)  # JSON-encoded metadata
@@ -355,6 +359,7 @@ class Evidence(Base):
     execution = relationship("TestExecution", back_populates="evidence")
     workflow_execution = relationship("WorkflowExecution", back_populates="evidence")
     workflow_step_execution = relationship("WorkflowStepExecution", back_populates="evidence")
+    attack_scenario = relationship("WorkflowAttackScenario")
     finding = relationship("Finding", back_populates="evidence")
 
 
@@ -550,6 +555,12 @@ class Workflow(Base):
         back_populates="workflow",
         cascade="all, delete-orphan",
     )
+    attack_scenarios = relationship(
+        "WorkflowAttackScenario",
+        back_populates="workflow",
+        cascade="all, delete-orphan",
+        order_by="WorkflowAttackScenario.created_at.desc()",
+    )
 
     __table_args__ = (
         Index("ix_workflows_project_name", "project_id", "name", unique=True),
@@ -651,6 +662,7 @@ class WorkflowExecution(Base):
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
     workflow_id = Column(String(36), ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False, index=True)
+    attack_scenario_id = Column(String(36), ForeignKey("workflow_attack_scenarios.id", ondelete="CASCADE"), nullable=True, index=True)
     status = Column(String(50), nullable=False, default="QUEUED", index=True)  # QUEUED, RUNNING, COMPLETED, FAILED
     result = Column(String(50), nullable=True, index=True)  # PASS, CONFIRMED, INCONCLUSIVE, ERROR
     result_reason = Column(Text, nullable=True)
@@ -663,6 +675,7 @@ class WorkflowExecution(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     workflow = relationship("Workflow", back_populates="executions")
+    attack_scenario = relationship("WorkflowAttackScenario", back_populates="executions")
     current_state = relationship("WorkflowState")
     step_executions = relationship(
         "WorkflowStepExecution",
@@ -675,6 +688,7 @@ class WorkflowExecution(Base):
 
     __table_args__ = (
         Index("ix_wf_exec_wf_status", "workflow_id", "status"),
+        Index("ix_wf_exec_scenario_status", "attack_scenario_id", "status"),
     )
 
 
@@ -686,9 +700,13 @@ class WorkflowStepExecution(Base):
         String(36), ForeignKey("workflow_executions.id", ondelete="CASCADE"), nullable=False, index=True
     )
     step_id = Column(String(36), ForeignKey("workflow_steps.id", ondelete="SET NULL"), nullable=True, index=True)
+    attack_step_id = Column(String(36), ForeignKey("workflow_attack_steps.id", ondelete="SET NULL"), nullable=True, index=True)
     step_order = Column(Integer, nullable=False)
     http_method = Column(String(10), nullable=True)
     endpoint_path = Column(String(500), nullable=True)
+    action = Column(String(50), nullable=True)  # EXECUTE, SKIP, REPLAY, SWITCH_IDENTITY
+    identity_id = Column(String(36), ForeignKey("identities.id", ondelete="SET NULL"), nullable=True, index=True)
+    identity_name = Column(String(100), nullable=True)
     status = Column(String(50), nullable=False, default="PENDING")  # PASS, CONFIRMED, INCONCLUSIVE, ERROR, SKIPPED
     request_summary = Column(JSON, nullable=True)
     response_summary = Column(JSON, nullable=True)
@@ -704,8 +722,70 @@ class WorkflowStepExecution(Base):
 
     workflow_execution = relationship("WorkflowExecution", back_populates="step_executions")
     step = relationship("WorkflowStep")
+    attack_step = relationship("WorkflowAttackStep")
+    identity = relationship("Identity", foreign_keys=[identity_id])
     evidence = relationship("Evidence", back_populates="workflow_step_execution", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("ix_wf_step_exec_wf_order", "workflow_execution_id", "step_order"),
+    )
+
+
+# ==============================================================================
+# STAGE 7.3: Stateful Attack Scenarios Models
+# ==============================================================================
+
+class WorkflowAttackScenario(Base):
+    __tablename__ = "workflow_attack_scenarios"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    workflow_id = Column(String(36), ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    scenario_type = Column(String(50), nullable=False, index=True)  # INVALID_STATE_TRANSITION, STEP_REPLAY, STEP_SKIP, STEP_REORDER, IDENTITY_SWITCH, CROSS_IDENTITY_CONTINUATION
+    status = Column(String(50), nullable=False, default="ACTIVE", index=True)  # DRAFT, ACTIVE, DISABLED
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    workflow = relationship("Workflow", back_populates="attack_scenarios")
+    steps = relationship(
+        "WorkflowAttackStep",
+        back_populates="scenario",
+        cascade="all, delete-orphan",
+        order_by="WorkflowAttackStep.position",
+    )
+    executions = relationship(
+        "WorkflowExecution",
+        back_populates="attack_scenario",
+        cascade="all, delete-orphan",
+        order_by="WorkflowExecution.created_at.desc()",
+    )
+    findings = relationship("Finding", back_populates="attack_scenario", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("ix_wf_attack_scenarios_wf_type", "workflow_id", "scenario_type"),
+    )
+
+
+class WorkflowAttackStep(Base):
+    __tablename__ = "workflow_attack_steps"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    scenario_id = Column(String(36), ForeignKey("workflow_attack_scenarios.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_step_id = Column(String(36), ForeignKey("workflow_steps.id", ondelete="SET NULL"), nullable=True, index=True)
+    position = Column(Integer, nullable=False)
+    action = Column(String(50), nullable=False)  # EXECUTE, SKIP, REPLAY, SWITCH_IDENTITY
+    identity_id = Column(String(36), ForeignKey("identities.id", ondelete="SET NULL"), nullable=True, index=True)
+    expected_behavior = Column(String(50), nullable=False, default="DENY")  # ALLOW, DENY
+    configuration = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    scenario = relationship("WorkflowAttackScenario", back_populates="steps")
+    source_step = relationship("WorkflowStep")
+    identity = relationship("Identity", foreign_keys=[identity_id])
+
+    __table_args__ = (
+        Index("ix_wf_attack_steps_scenario_pos", "scenario_id", "position"),
     )

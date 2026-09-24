@@ -7,7 +7,7 @@ This module provides an isolated, local FastAPI router intended strictly for
 automated test execution and local development verification of Stage 3 BOLA.
 """
 
-from fastapi import APIRouter, Header, HTTPException, Depends
+from fastapi import APIRouter, Header, HTTPException, Depends, Request
 from typing import Optional, Dict, Any
 
 demo_target_router = APIRouter(prefix="/demo-target", tags=["TEST ONLY - Demo Target"])
@@ -395,9 +395,15 @@ def demo_auth_server_error():
 # ==============================================================================
 
 DEFAULT_WORKFLOW_ORDERS: Dict[str, Dict[str, Any]] = {
-    "order-valid-1": {"state": "CREATED", "vulnerable": False},
-    "order-vuln-1": {"state": "CREATED", "vulnerable": True},
-    "order-protected-1": {"state": "CANCELLED", "vulnerable": False},
+    "order-valid-1": {"state": "CREATED", "vulnerable": False, "owner_id": "user_alice_001"},
+    "order-vuln-1": {"state": "CREATED", "vulnerable": True, "owner_id": "user_alice_001"},
+    "order-protected-1": {"state": "CANCELLED", "vulnerable": False, "owner_id": "user_alice_001"},
+    "order-skip-vuln": {"state": "CREATED", "vulnerable": True, "owner_id": "user_alice_001"},
+    "order-skip-prot": {"state": "CREATED", "vulnerable": False, "owner_id": "user_alice_001"},
+    "order-replay-vuln": {"state": "CREATED", "vulnerable": True, "owner_id": "user_alice_001"},
+    "order-replay-prot": {"state": "CREATED", "vulnerable": False, "owner_id": "user_alice_001"},
+    "order-id-switch-vuln": {"state": "CREATED", "vulnerable": True, "owner_id": "user_alice_001"},
+    "order-id-switch-prot": {"state": "CREATED", "vulnerable": False, "owner_id": "user_alice_001"},
 }
 
 DEMO_WORKFLOW_ORDERS: Dict[str, Dict[str, Any]] = {
@@ -416,6 +422,16 @@ def demo_workflow_reset():
     return {"status": "reset", "orders": list(DEMO_WORKFLOW_ORDERS.keys())}
 
 
+@demo_target_router.post(
+    "/workflow/reset",
+    summary="[TEST FIXTURE ONLY] Reset Workflow Test Orders (POST)",
+    description="Explicit test fixture endpoint for automated setup. Security testing engines cannot invoke this method.",
+)
+def demo_workflow_reset_post():
+    """Explicit test fixture only endpoint."""
+    return demo_workflow_reset()
+
+
 @demo_target_router.get(
     "/workflow/orders/{order_id}/status",
     summary="[TEST ONLY] Get Order Status",
@@ -425,7 +441,111 @@ def demo_workflow_order_status(order_id: str):
     order = DEMO_WORKFLOW_ORDERS.get(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-    return {"order_id": order_id, "state": order["state"]}
+    return {"order_id": order_id, "state": order["state"], "owner_id": order.get("owner_id")}
+
+
+@demo_target_router.get(
+    "/workflow/orders/{order_id}/checkout",
+    summary="[TEST ONLY] Checkout Order",
+    description="Transitions order from CREATED to CHECKED_OUT.",
+)
+def demo_workflow_order_checkout(order_id: str):
+    order = DEMO_WORKFLOW_ORDERS.get(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    if order["state"] == "CREATED":
+        order["state"] = "CHECKED_OUT"
+        return {"order_id": order_id, "state": "CHECKED_OUT", "message": "Order checked out successfully"}
+
+    raise HTTPException(status_code=409, detail=f"Cannot checkout order in state '{order['state']}'")
+
+
+@demo_target_router.get(
+    "/workflow/orders/{order_id}/pay",
+    summary="[TEST ONLY] Pay Order",
+    description="Processes payment for an order. Demonstrates step skipping and step replay vulnerabilities.",
+)
+def demo_workflow_order_pay(order_id: str):
+    order = DEMO_WORKFLOW_ORDERS.get(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # Legitimate payment path from CHECKED_OUT to PAID
+    if order["state"] == "CHECKED_OUT":
+        order["state"] = "PAID"
+        return {"order_id": order_id, "state": "PAID", "message": "Order payment processed successfully"}
+
+    # Adversarial: Step Skip (attempting to pay directly from CREATED without checkout)
+    if order["state"] == "CREATED":
+        if order.get("vulnerable"):
+            order["state"] = "PAID"
+            return {
+                "order_id": order_id,
+                "state": "PAID",
+                "message": "Payment accepted despite skipped checkout (vulnerable logic flaw)",
+            }
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot pay order in state 'CREATED'. Prerequisite step CHECKED_OUT is required.",
+        )
+
+    # Adversarial: Step Replay (attempting duplicate payment when already PAID)
+    if order["state"] == "PAID":
+        if order.get("vulnerable"):
+            return {
+                "order_id": order_id,
+                "state": "PAID",
+                "message": "Duplicate payment processed (replayed)",
+            }
+        raise HTTPException(
+            status_code=409,
+            detail="Order is already PAID. Duplicate payment rejected by idempotency check.",
+        )
+
+    raise HTTPException(status_code=409, detail=f"Cannot pay order in state '{order['state']}'")
+
+
+@demo_target_router.get(
+    "/workflow/orders/{order_id}/claim",
+    summary="[TEST ONLY] Claim Order Access",
+    description="Validates identity access to order. Demonstrates identity switching and cross-identity access flaws.",
+)
+def demo_workflow_order_claim(
+    order_id: str,
+    request: Request,
+):
+    order = DEMO_WORKFLOW_ORDERS.get(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # Extract caller identity from Authorization header or custom header
+    auth_header = request.headers.get("authorization", "")
+    caller_id = request.headers.get("x-identity-id", "")
+    if not caller_id and "Bearer " in auth_header:
+        token = auth_header.replace("Bearer ", "").strip()
+        caller_id = token
+
+    owner = order.get("owner_id", "user_alice_001")
+    if caller_id and caller_id != owner:
+        if order.get("vulnerable"):
+            return {
+                "order_id": order_id,
+                "owner": owner,
+                "claimed_by": caller_id,
+                "message": "Order claimed across identities (vulnerable)",
+            }
+        raise HTTPException(
+            status_code=403,
+            detail=f"Forbidden: Order '{order_id}' belongs to a different identity.",
+        )
+
+    return {
+        "order_id": order_id,
+        "owner": owner,
+        "claimed_by": caller_id or owner,
+        "message": "Order claimed successfully.",
+    }
 
 
 @demo_target_router.get(
