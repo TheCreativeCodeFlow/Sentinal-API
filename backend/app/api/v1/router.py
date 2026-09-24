@@ -34,6 +34,8 @@ from app.models import (
     AttackGraphNode,
     AttackGraphEdge,
     FindingCorrelation,
+    AttackPath,
+    AttackPathStep,
 )
 from app.schemas import (
     ProjectCreate,
@@ -140,9 +142,14 @@ from app.schemas import (
     AttackGraphDetailInDB,
     FindingCorrelationInDB,
     CorrelationRunResponse,
+    AttackPathStepInDB,
+    AttackPathInDB,
+    AttackPathDetailInDB,
+    AttackPathAnalysisResponse,
 )
 from app.services.security_engine.redactor import SENSITIVE_HEADER_NAMES
 from app.services.security_engine.correlation_engine import CorrelationEngine
+from app.services.security_engine.attack_path_engine import AttackPathEngine
 
 
 
@@ -4347,6 +4354,175 @@ def get_attack_graph_edges(
     return [format_attack_graph_edge_response(e) for e in edges]
 
 
+# ==============================================================================
+# STAGE 8.2: Deterministic Attack Path Detection Router & Formatters
+# ==============================================================================
+attack_path_router = APIRouter(tags=["attack-paths"])
+
+
+def format_attack_path_step_response(step: AttackPathStep) -> AttackPathStepInDB:
+    finding = step.finding
+    prereq = step.prerequisite_finding
+    endpoint_path = finding.endpoint.path if (finding and finding.endpoint) else None
+    resource_name = finding.resource.name if (finding and finding.resource) else None
+    identity_name = finding.attacker_identity.name if (finding and finding.attacker_identity) else None
+    return AttackPathStepInDB(
+        id=step.id,
+        attack_path_id=step.attack_path_id,
+        position=step.position,
+        finding_id=step.finding_id,
+        prerequisite_finding_id=step.prerequisite_finding_id,
+        relationship_type=step.relationship_type,
+        reason=step.reason,
+        created_at=step.created_at,
+        finding_title=finding.title if finding else None,
+        finding_type=finding.type if finding else None,
+        finding_severity=finding.severity if finding else None,
+        prerequisite_finding_title=prereq.title if prereq else None,
+        endpoint_path=endpoint_path,
+        resource_name=resource_name,
+        identity_name=identity_name,
+    )
+
+
+def format_attack_path_response(path: AttackPath) -> AttackPathInDB:
+    steps = [format_attack_path_step_response(s) for s in path.steps] if path.steps else []
+    return AttackPathInDB(
+        id=path.id,
+        project_id=path.project_id,
+        attack_graph_id=path.attack_graph_id,
+        name=path.name,
+        description=path.description,
+        status=path.status,
+        confidence=path.confidence,
+        created_at=path.created_at,
+        updated_at=path.updated_at,
+        step_count=len(steps),
+        steps=steps,
+    )
+
+
+def format_attack_path_detail_response(path: AttackPath) -> AttackPathDetailInDB:
+    return format_attack_path_response(path)
+
+
+@attack_path_router.post(
+    "/projects/{project_id}/attack-paths/analyze",
+    response_model=AttackPathAnalysisResponse,
+)
+def analyze_project_attack_paths(
+    project_id: int,
+    db: Session = Depends(get_db),
+):
+    """
+    Run deterministic attack path analysis for a project.
+    Completely offline - never executes target APIs.
+    """
+    project = get_project_or_404(project_id, db)
+    # Ensure active AttackGraph exists; if missing, run CorrelationEngine first
+    active_graph = (
+        db.query(AttackGraph)
+        .filter(AttackGraph.project_id == project.id, AttackGraph.status == "ACTIVE")
+        .first()
+    )
+    if not active_graph:
+        corr_engine = CorrelationEngine(db=db)
+        corr_engine.run_correlation(project_id=project.id)
+
+    engine = AttackPathEngine(db=db)
+    result = engine.analyze_project_attack_paths(project_id=project.id)
+    return AttackPathAnalysisResponse(
+        project_id=result["project_id"],
+        attack_graph_id=result["attack_graph_id"],
+        paths_count=result["paths_count"],
+        paths=[format_attack_path_detail_response(p) for p in result["paths"]],
+    )
+
+
+@attack_path_router.get(
+    "/projects/{project_id}/attack-paths",
+    response_model=List[AttackPathDetailInDB],
+)
+def list_project_attack_paths(
+    project_id: int,
+    db: Session = Depends(get_db),
+):
+    """List all detected attack paths for a project."""
+    project = get_project_or_404(project_id, db)
+    paths = (
+        db.query(AttackPath)
+        .filter(AttackPath.project_id == project.id)
+        .order_by(AttackPath.created_at.desc())
+        .all()
+    )
+    return [format_attack_path_detail_response(p) for p in paths]
+
+
+@attack_path_router.get(
+    "/attack-paths/{path_id}",
+    response_model=AttackPathDetailInDB,
+)
+def get_attack_path(
+    path_id: str,
+    db: Session = Depends(get_db),
+):
+    """Get single attack path detail with all ordered steps."""
+    path = db.query(AttackPath).filter(AttackPath.id == path_id).first()
+    if not path:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Attack path {path_id} not found",
+        )
+    return format_attack_path_detail_response(path)
+
+
+@attack_path_router.get(
+    "/attack-paths/{path_id}/steps",
+    response_model=List[AttackPathStepInDB],
+)
+def get_attack_path_steps(
+    path_id: str,
+    db: Session = Depends(get_db),
+):
+    """Get all ordered steps for an attack path."""
+    path = db.query(AttackPath).filter(AttackPath.id == path_id).first()
+    if not path:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Attack path {path_id} not found",
+        )
+    steps = (
+        db.query(AttackPathStep)
+        .filter(AttackPathStep.attack_path_id == path_id)
+        .order_by(AttackPathStep.position.asc())
+        .all()
+    )
+    return [format_attack_path_step_response(s) for s in steps]
+
+
+@attack_path_router.post(
+    "/attack-paths/{path_id}/rebuild",
+    response_model=AttackPathDetailInDB,
+)
+def rebuild_attack_path(
+    path_id: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Rebuild and re-verify an attack path offline.
+    Never executes target APIs.
+    """
+    path = db.query(AttackPath).filter(AttackPath.id == path_id).first()
+    if not path:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Attack path {path_id} not found",
+        )
+    engine = AttackPathEngine(db=db)
+    updated_path = engine.rebuild_attack_path(path_id=path.id)
+    return format_attack_path_detail_response(updated_path)
+
+
 # Include sub-routers into main router
 router.include_router(project_router)
 router.include_router(api_router)
@@ -4365,3 +4541,4 @@ router.include_router(property_router)
 router.include_router(auth_security_router)
 router.include_router(workflow_router)
 router.include_router(correlation_router)
+router.include_router(attack_path_router)

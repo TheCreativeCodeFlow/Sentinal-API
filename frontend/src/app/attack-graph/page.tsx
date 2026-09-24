@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useState, useMemo } from "react";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 
@@ -83,20 +84,86 @@ interface CorrelationRunResult {
   graph?: AttackGraphItem | null;
 }
 
+interface AttackPathStepItem {
+  id: string;
+  attack_path_id: string;
+  position: number;
+  finding_id: string;
+  prerequisite_finding_id?: string | null;
+  relationship_type: string;
+  reason: string;
+  created_at: string;
+  finding_title?: string | null;
+  finding_type?: string | null;
+  finding_severity?: string | null;
+  prerequisite_finding_title?: string | null;
+  endpoint_path?: string | null;
+  resource_name?: string | null;
+  identity_name?: string | null;
+}
+
+interface AttackPathItem {
+  id: string;
+  project_id: number;
+  attack_graph_id: string;
+  name: string;
+  description?: string | null;
+  status: string;
+  confidence: string;
+  created_at: string;
+  updated_at: string;
+  step_count: number;
+  steps: AttackPathStepItem[];
+}
+
+interface FindingDetailItem {
+  id: string;
+  project_id: number;
+  endpoint_id?: number | null;
+  attacker_identity_id?: string | null;
+  resource_id?: string | null;
+  workflow_id?: string | null;
+  type: string;
+  severity: string;
+  confidence: string;
+  status: string;
+  title: string;
+  description: string;
+  expected_authorization?: string | null;
+  actual_behavior?: string | null;
+  exposed_properties?: string | null;
+  authentication_mechanism?: string | null;
+  remediation: string;
+  created_at: string;
+  updated_at: string;
+  endpoint?: { method: string; path: string } | null;
+  attacker_identity?: { name: string; auth_type: string } | null;
+  resource?: { name: string; resource_type: string } | null;
+}
+
 export default function AttackGraphPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null);
 
   const [graphDetail, setGraphDetail] = useState<AttackGraphDetailItem | null>(null);
   const [correlations, setCorrelations] = useState<FindingCorrelationItem[]>([]);
+  const [attackPaths, setAttackPaths] = useState<AttackPathItem[]>([]);
 
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
+  const [analyzingPaths, setAnalyzingPaths] = useState(false);
+  const [rebuildingPathId, setRebuildingPathId] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
+  // Finding Detail Drawer State
+  const [selectedFindingId, setSelectedFindingId] = useState<string | null>(null);
+  const [findingDetail, setFindingDetail] = useState<FindingDetailItem | null>(null);
+  const [loadingFindingDetail, setLoadingFindingDetail] = useState(false);
+
   // Filters & Selected elements
-  const [viewTab, setViewTab] = useState<"graph" | "correlations" | "nodes">("graph");
+  const [viewTab, setViewTab] = useState<"paths" | "graph" | "correlations" | "nodes">("paths");
+  const [pathConfidenceFilter, setPathConfidenceFilter] = useState<string>("ALL");
   const [relFilter, setRelFilter] = useState<string>("ALL");
   const [nodeTypeFilter, setNodeTypeFilter] = useState<string>("ALL");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -124,7 +191,7 @@ export default function AttackGraphPage() {
     loadProjects();
   }, []);
 
-  // Load project graphs and correlations when project changes
+  // Load project graphs, correlations, and attack paths when project changes
   useEffect(() => {
     if (!selectedProjectId) return;
 
@@ -155,6 +222,13 @@ export default function AttackGraphPage() {
           } else {
             setGraphDetail(null);
           }
+        }
+
+        // Load attack paths
+        const pathsRes = await fetch(`/api/v1/projects/${selectedProjectId}/attack-paths`, { credentials: "include" });
+        if (pathsRes.ok) {
+          const pathsData: AttackPathItem[] = await pathsRes.json();
+          setAttackPaths(pathsData);
         }
       } catch (err: unknown) {
         setErrorMsg(err instanceof Error ? err.message : "Failed to load attack graph data");
@@ -203,6 +277,82 @@ export default function AttackGraphPage() {
     }
   };
 
+  // Run Attack Path Analysis
+  const handleAnalyzeAttackPaths = async () => {
+    if (!selectedProjectId) return;
+    try {
+      setAnalyzingPaths(true);
+      setErrorMsg(null);
+      setSuccessMsg(null);
+
+      const res = await fetch(`/api/v1/projects/${selectedProjectId}/attack-paths/analyze`, {
+        method: "POST",
+        credentials: "include",
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || "Failed to analyze attack paths");
+      }
+
+      const data = await res.json();
+      setAttackPaths(data.paths);
+      setSuccessMsg(
+        `Attack path analysis complete: detected ${data.paths_count} confirmed attack paths.`
+      );
+      setViewTab("paths");
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : "Failed to detect attack paths");
+    } finally {
+      setAnalyzingPaths(false);
+    }
+  };
+
+  // Rebuild specific attack path
+  const handleRebuildPath = async (pathId: string) => {
+    try {
+      setRebuildingPathId(pathId);
+      setErrorMsg(null);
+
+      const res = await fetch(`/api/v1/attack-paths/${pathId}/rebuild`, {
+        method: "POST",
+        credentials: "include",
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || "Failed to rebuild attack path");
+      }
+
+      const updatedPath: AttackPathItem = await res.json();
+      setAttackPaths((prev) => prev.map((p) => (p.id === pathId ? updatedPath : p)));
+      setSuccessMsg(`Attack path "${updatedPath.name}" rebuilt and validated offline.`);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : "Failed to rebuild attack path");
+    } finally {
+      setRebuildingPathId(null);
+    }
+  };
+
+  // Open Finding Detail Drawer
+  const handleOpenFindingDetail = async (findingId: string) => {
+    try {
+      setSelectedFindingId(findingId);
+      setLoadingFindingDetail(true);
+      const res = await fetch(`/api/v1/findings/${findingId}`, { credentials: "include" });
+      if (res.ok) {
+        const data: FindingDetailItem = await res.json();
+        setFindingDetail(data);
+      } else {
+        setFindingDetail(null);
+      }
+    } catch {
+      setFindingDetail(null);
+    } finally {
+      setLoadingFindingDetail(false);
+    }
+  };
+
   // Distinct relationship types for filtering
   const availableRelTypes = useMemo(() => {
     const types = new Set<string>();
@@ -242,6 +392,16 @@ export default function AttackGraphPage() {
       return true;
     });
   }, [graphDetail, filteredNodes, relFilter]);
+
+  // Filtered attack paths
+  const filteredAttackPaths = useMemo(() => {
+    return attackPaths.filter((path) => {
+      if (pathConfidenceFilter !== "ALL" && path.confidence !== pathConfidenceFilter) {
+        return false;
+      }
+      return true;
+    });
+  }, [attackPaths, pathConfidenceFilter]);
 
   // Selected node and edge items
   const selectedNode = useMemo(() => {
@@ -318,19 +478,20 @@ export default function AttackGraphPage() {
         return { bg: "#0284c7", border: "#38bdf8", text: "#e0f2fe" };
       case "IDENTITY":
         return { bg: "#ea580c", border: "#fb923c", text: "#ffedd5" };
-      case "ROLE":
-        return { bg: "#4f46e5", border: "#818cf8", text: "#e0e7ff" };
       case "RESOURCE":
-        return { bg: "#059669", border: "#34d399", text: "#d1fae5" };
+        return { bg: "#10b981", border: "#34d399", text: "#d1fae5" };
       case "WORKFLOW":
+        return { bg: "#8b5cf6", border: "#a78bfa", text: "#ede9fe" };
       case "WORKFLOW_EXECUTION":
-        return { bg: "#9333ea", border: "#c084fc", text: "#f3e8ff" };
+        return { bg: "#06b6d4", border: "#22d3ee", text: "#cffafe" };
       case "AUTHENTICATION":
-        return { bg: "#d97706", border: "#fbbf24", text: "#fef3c7" };
+        return { bg: "#ec4899", border: "#f472b6", text: "#fce7f3" };
       case "PROPERTY":
-        return { bg: "#db2777", border: "#f472b6", text: "#fce7f3" };
+        return { bg: "#eab308", border: "#facc15", text: "#fef9c3" };
+      case "ROLE":
+        return { bg: "#6366f1", border: "#818cf8", text: "#e0e7ff" };
       default:
-        return { bg: "#475569", border: "#94a3b8", text: "#f1f5f9" };
+        return { bg: "#64748b", border: "#94a3b8", text: "#f1f5f9" };
     }
   };
 
@@ -338,23 +499,37 @@ export default function AttackGraphPage() {
   const getEdgeColor = (relType: string) => {
     switch (relType) {
       case "AUTH_TO_AUTHORIZATION":
-        return "#f59e0b"; // gold
+        return "#ec4899"; // pink
       case "AUTHORIZATION_TO_WORKFLOW":
         return "#a855f7"; // purple
       case "PROPERTY_EXPOSURE_CHAIN":
-        return "#10b981"; // emerald
-      case "SAME_IDENTITY":
-        return "#f97316"; // orange
+        return "#eab308"; // yellow
       case "SAME_ENDPOINT":
-        return "#0284c7"; // light blue
+        return "#38bdf8"; // sky blue
+      case "SAME_IDENTITY":
+        return "#fb923c"; // orange
       case "SAME_RESOURCE":
-        return "#14b8a6"; // teal
+        return "#34d399"; // emerald
       case "SAME_WORKFLOW":
         return "#8b5cf6"; // violet
       case "SAME_EXECUTION":
         return "#06b6d4"; // cyan
       default:
         return "#64748b"; // slate
+    }
+  };
+
+  // Finding badge style helper
+  const getFindingSeverityBadge = (severity?: string | null) => {
+    switch (severity?.toUpperCase()) {
+      case "CRITICAL":
+        return "bg-red-500/20 text-red-300 border-red-500/40";
+      case "HIGH":
+        return "bg-rose-500/20 text-rose-300 border-rose-500/40";
+      case "MEDIUM":
+        return "bg-amber-500/20 text-amber-300 border-amber-500/40";
+      default:
+        return "bg-blue-500/20 text-blue-300 border-blue-500/40";
     }
   };
 
@@ -365,19 +540,19 @@ export default function AttackGraphPage() {
         <div>
           <div className="flex items-center gap-2.5">
             <h1 className="text-2xl font-bold tracking-tight text-foreground">
-              Deterministic Attack Graph & Finding Correlation
+              Deterministic Attack Graph & Attack Path Detection
             </h1>
             <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30 uppercase">
-              Stage 8.1
+              Stage 8.2
             </span>
           </div>
           <p className="text-sm text-muted-foreground mt-1">
-            Explainable multi-vulnerability relationships derived analytically without target traffic.
+            Convert finding correlations into explainable, ordered security exploit chains without target traffic.
           </p>
         </div>
 
-        {/* Project Selector & Run Action */}
-        <div className="flex items-center gap-3">
+        {/* Project Selector & Actions */}
+        <div className="flex items-center gap-2.5">
           <div className="flex items-center gap-2">
             <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground whitespace-nowrap">
               Project:
@@ -400,17 +575,37 @@ export default function AttackGraphPage() {
             size="sm"
             onClick={handleRunCorrelation}
             disabled={running || !selectedProjectId}
-            className="bg-purple-600 hover:bg-purple-500 text-white font-medium"
+            variant="outline"
+            className="border-purple-500/30 hover:bg-purple-500/10 text-purple-300"
           >
             {running ? (
               <span className="flex items-center gap-1.5">
-                <span className="inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                Analyzing...
+                <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                Correlating...
               </span>
             ) : (
               <span className="flex items-center gap-1.5">
                 <span>⚡</span>
                 Run Correlation
+              </span>
+            )}
+          </Button>
+
+          <Button
+            size="sm"
+            onClick={handleAnalyzeAttackPaths}
+            disabled={analyzingPaths || !selectedProjectId}
+            className="bg-indigo-600 hover:bg-indigo-500 text-white font-medium"
+          >
+            {analyzingPaths ? (
+              <span className="flex items-center gap-1.5">
+                <span className="inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                Detecting Paths...
+              </span>
+            ) : (
+              <span className="flex items-center gap-1.5">
+                <span>⚔️</span>
+                Detect Attack Paths
               </span>
             )}
           </Button>
@@ -422,7 +617,7 @@ export default function AttackGraphPage() {
         <div className="flex items-start gap-2">
           <span className="text-base font-bold">🛡️</span>
           <div>
-            <strong className="font-semibold text-purple-200">Analytical Safety Guarantee:</strong> Finding correlation operates strictly on confirmed findings without executing requests against the target API. No AI or probabilistic inference is used; all relationships are derived through deterministic domain rules.
+            <strong className="font-semibold text-purple-200">Analytical Safety Guarantee:</strong> Finding correlation and attack path detection operate strictly on confirmed findings without executing requests against the target API. No AI or probabilistic inference is used; all relationships and attack chains are derived through deterministic domain rules.
           </div>
         </div>
       </div>
@@ -457,21 +652,32 @@ export default function AttackGraphPage() {
           <span className="text-[10px] uppercase text-purple-400 block font-bold">Correlated Findings</span>
           <span className="text-2xl font-bold text-purple-400">{correlatedFindingCount}</span>
         </div>
+        <div className="bg-card border border-indigo-500/40 rounded-lg p-3.5 bg-indigo-500/5">
+          <span className="text-[10px] uppercase text-indigo-400 block font-bold">Confirmed Attack Paths</span>
+          <span className="text-2xl font-bold text-indigo-400">{attackPaths.length}</span>
+        </div>
         <div className="bg-card border border-border rounded-lg p-3.5">
           <span className="text-[10px] uppercase text-muted-foreground block font-bold">Attack Graph Nodes</span>
           <span className="text-2xl font-bold text-foreground">{graphDetail?.nodes.length || 0}</span>
         </div>
-        <div className="bg-card border border-border rounded-lg p-3.5">
-          <span className="text-[10px] uppercase text-muted-foreground block font-bold">Relationship Edges</span>
-          <span className="text-2xl font-bold text-foreground">{graphDetail?.edges.length || 0}</span>
-        </div>
       </div>
 
-      {/* Navigation Tabs and Filter Controls */}
+      {/* Navigation Tabs and Controls */}
       <Card className="p-4 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-border pb-3">
           {/* Subnav Tabs */}
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => setViewTab("paths")}
+              className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors flex items-center gap-1.5 ${
+                viewTab === "paths"
+                  ? "bg-indigo-600 text-white"
+                  : "bg-muted text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <span>⚔️</span>
+              Attack Paths ({attackPaths.length})
+            </button>
             <button
               onClick={() => setViewTab("graph")}
               className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
@@ -504,43 +710,245 @@ export default function AttackGraphPage() {
             </button>
           </div>
 
-          {/* Filters */}
-          <div className="flex flex-wrap items-center gap-3 text-xs">
-            <div className="flex items-center gap-1.5">
-              <span className="text-muted-foreground">Relationship:</span>
+          {/* Contextual Filters */}
+          {viewTab === "paths" ? (
+            <div className="flex items-center gap-2 text-xs">
+              <span className="text-muted-foreground">Confidence:</span>
               <select
                 className="h-8 px-2 bg-background border border-input rounded text-xs outline-none"
-                value={relFilter}
-                onChange={(e) => setRelFilter(e.target.value)}
+                value={pathConfidenceFilter}
+                onChange={(e) => setPathConfidenceFilter(e.target.value)}
               >
-                <option value="ALL">All Relationships ({availableRelTypes.length})</option>
-                {availableRelTypes.map((t) => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
-                ))}
+                <option value="ALL">All Confidences</option>
+                <option value="HIGH">HIGH Confidence</option>
+                <option value="MEDIUM">MEDIUM Confidence</option>
               </select>
             </div>
+          ) : (
+            <div className="flex flex-wrap items-center gap-3 text-xs">
+              <div className="flex items-center gap-1.5">
+                <span className="text-muted-foreground">Relationship:</span>
+                <select
+                  className="h-8 px-2 bg-background border border-input rounded text-xs outline-none"
+                  value={relFilter}
+                  onChange={(e) => setRelFilter(e.target.value)}
+                >
+                  <option value="ALL">All Relationships ({availableRelTypes.length})</option>
+                  {availableRelTypes.map((t) => (
+                    <option key={t} value={t}>
+                      {t}
+                    </option>
+                  ))}
+                </select>
+              </div>
 
-            <div className="flex items-center gap-1.5">
-              <span className="text-muted-foreground">Node Type:</span>
-              <select
-                className="h-8 px-2 bg-background border border-input rounded text-xs outline-none"
-                value={nodeTypeFilter}
-                onChange={(e) => setNodeTypeFilter(e.target.value)}
-              >
-                <option value="ALL">All Types ({availableNodeTypes.length})</option>
-                {availableNodeTypes.map((t) => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
-                ))}
-              </select>
+              <div className="flex items-center gap-1.5">
+                <span className="text-muted-foreground">Node Type:</span>
+                <select
+                  className="h-8 px-2 bg-background border border-input rounded text-xs outline-none"
+                  value={nodeTypeFilter}
+                  onChange={(e) => setNodeTypeFilter(e.target.value)}
+                >
+                  <option value="ALL">All Types ({availableNodeTypes.length})</option>
+                  {availableNodeTypes.map((t) => (
+                    <option key={t} value={t}>
+                      {t}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
-          </div>
+          )}
         </div>
 
-        {/* View Tab 1: Interactive Graph Visualizer */}
+        {/* View Tab 1: Attack Paths View (Stage 8.2) */}
+        {viewTab === "paths" && (
+          <div className="space-y-6">
+            {/* Core Distinction Callout */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+              <div className="p-3 rounded-lg border border-purple-500/30 bg-purple-500/5 space-y-1">
+                <span className="font-bold text-purple-300 uppercase tracking-wide text-[10px]">
+                  Correlated Findings
+                </span>
+                <p className="text-muted-foreground leading-relaxed">
+                  Multiple confirmed findings sharing domain context (e.g. same endpoint, identity, or resource). Demonstrates analytical relationship without implied chronological exploit order.
+                </p>
+              </div>
+              <div className="p-3 rounded-lg border border-indigo-500/30 bg-indigo-500/5 space-y-1">
+                <span className="font-bold text-indigo-300 uppercase tracking-wide text-[10px]">
+                  Confirmed Attack Path
+                </span>
+                <p className="text-muted-foreground leading-relaxed">
+                  An ordered, causal security chain where an attacker leverages an initial flaw (e.g. Authentication Bypass) to unlock subsequent authorizations, workflows, and property extractions.
+                </p>
+              </div>
+            </div>
+
+            {/* Attack Path List */}
+            {filteredAttackPaths.length === 0 ? (
+              <div className="text-center py-16 space-y-3 border border-dashed border-border rounded-xl">
+                <div className="text-3xl">⚔️</div>
+                <div className="font-semibold text-sm text-foreground">No Attack Paths Detected</div>
+                <p className="text-xs text-muted-foreground max-w-sm mx-auto">
+                  Click <strong>Detect Attack Paths</strong> to evaluate confirmed finding correlations and synthesize sequential exploit chains.
+                </p>
+                <Button
+                  size="sm"
+                  onClick={handleAnalyzeAttackPaths}
+                  disabled={analyzingPaths || !selectedProjectId}
+                  className="bg-indigo-600 hover:bg-indigo-500 text-white font-medium"
+                >
+                  Detect Attack Paths Now
+                </Button>
+              </div>
+            ) : (
+              <div className="space-y-5">
+                {filteredAttackPaths.map((path) => (
+                  <div
+                    key={path.id}
+                    className="p-5 rounded-xl border border-border bg-card/70 space-y-4 shadow-sm"
+                  >
+                    {/* Path Card Header */}
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-border/60 pb-3">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <h3 className="text-sm font-bold text-foreground">{path.name}</h3>
+                          <span
+                            className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase border ${
+                              path.confidence === "HIGH"
+                                ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
+                                : "bg-amber-500/20 text-amber-300 border-amber-500/30"
+                            }`}
+                          >
+                            {path.confidence} Confidence
+                          </span>
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-muted text-muted-foreground uppercase">
+                            {path.status}
+                          </span>
+                          <span className="text-[10px] font-mono text-muted-foreground">
+                            {path.steps.length} Steps
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Rebuild Path Button */}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handleRebuildPath(path.id)}
+                        disabled={rebuildingPathId === path.id}
+                        className="text-xs h-7 px-2.5 border-border hover:bg-muted"
+                      >
+                        {rebuildingPathId === path.id ? (
+                          <span className="flex items-center gap-1">
+                            <span className="inline-block w-2.5 h-2.5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                            Rebuilding...
+                          </span>
+                        ) : (
+                          "Rebuild Path"
+                        )}
+                      </Button>
+                    </div>
+
+                    {/* Synthesized Human-Readable Narrative Explanation */}
+                    {path.description && (
+                      <div className="rounded-lg bg-indigo-500/10 border border-indigo-500/20 p-3 text-xs leading-relaxed text-indigo-200">
+                        <strong className="font-semibold text-indigo-300 block mb-1">
+                          Deterministic Exploit Sequence Narrative:
+                        </strong>
+                        {path.description}
+                      </div>
+                    )}
+
+                    {/* Ordered Visual Chain */}
+                    <div className="space-y-3 pt-2">
+                      <span className="text-[10px] uppercase font-bold text-muted-foreground block">
+                        Ordered Execution Chain
+                      </span>
+
+                      <div className="space-y-2">
+                        {path.steps.map((step, idx) => {
+                          const isLast = idx === path.steps.length - 1;
+                          return (
+                            <React.Fragment key={step.id}>
+                              {/* Step Node Card */}
+                              <div
+                                onClick={() => handleOpenFindingDetail(step.finding_id)}
+                                className="group cursor-pointer p-3.5 rounded-lg border border-border/80 bg-background/80 hover:bg-muted/30 hover:border-indigo-500/50 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                              >
+                                <div className="space-y-1.5">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded bg-muted text-foreground">
+                                      Step {step.position}
+                                    </span>
+                                    <span
+                                      className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border uppercase ${getFindingSeverityBadge(
+                                        step.finding_severity
+                                      )}`}
+                                    >
+                                      {step.finding_type || "FINDING"}
+                                    </span>
+                                    <span className="text-xs font-semibold text-foreground group-hover:text-indigo-300 transition-colors">
+                                      {step.finding_title || `Finding #${step.finding_id}`}
+                                    </span>
+                                  </div>
+
+                                  {/* Contextual Badges */}
+                                  <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                                    {step.endpoint_path && (
+                                      <span className="font-mono bg-muted/40 px-1.5 py-0.5 rounded">
+                                        Endpoint: {step.endpoint_path}
+                                      </span>
+                                    )}
+                                    {step.identity_name && (
+                                      <span className="bg-muted/40 px-1.5 py-0.5 rounded">
+                                        Identity: {step.identity_name}
+                                      </span>
+                                    )}
+                                    {step.resource_name && (
+                                      <span className="bg-muted/40 px-1.5 py-0.5 rounded">
+                                        Resource: {step.resource_name}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center gap-2">
+                                  <span className="text-xs text-indigo-400 group-hover:underline whitespace-nowrap">
+                                    Inspect Details →
+                                  </span>
+                                </div>
+                              </div>
+
+                              {/* Downward Transition Connector */}
+                              {!isLast && (
+                                <div className="flex flex-col items-center py-1.5">
+                                  <div className="flex items-center gap-2 text-xs text-muted-foreground my-1">
+                                    <div className="h-4 w-px bg-indigo-500/40" />
+                                    <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                                      {path.steps[idx + 1].relationship_type.replace(/_/g, " ")}
+                                    </span>
+                                    <div className="h-4 w-px bg-indigo-500/40" />
+                                  </div>
+                                  <span className="text-indigo-400 font-bold text-sm">↓</span>
+                                  <p className="text-[11px] text-muted-foreground max-w-xl text-center italic mt-0.5 px-4">
+                                    {path.steps[idx + 1].reason}
+                                  </p>
+                                </div>
+                              )}
+                            </React.Fragment>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* View Tab 2: Interactive Graph Visualizer (Stage 8.1) */}
         {viewTab === "graph" && (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
             {/* Graph Canvas / SVG (8 cols) */}
@@ -598,19 +1006,17 @@ export default function AttackGraphPage() {
                       const isCorrelation = !edge.relationship_type.includes("_TO_");
 
                       return (
-                        <g key={edge.id} className="cursor-pointer" onClick={() => {
-                          setSelectedEdgeId(edge.id);
-                          setSelectedNodeId(null);
-                        }}>
+                        <g key={edge.id} className="cursor-pointer" onClick={() => setSelectedEdgeId(edge.id)}>
                           <line
                             x1={src.x}
                             y1={src.y}
                             x2={tgt.x}
                             y2={tgt.y}
-                            stroke={strokeColor}
-                            strokeWidth={isSelected ? 3 : isHovered ? 2.5 : isCorrelation ? 2 : 1.2}
+                            stroke={isSelected ? "#ec4899" : strokeColor}
+                            strokeWidth={isSelected ? 3 : isHovered ? 2.5 : 1.5}
+                            strokeOpacity={isSelected ? 1 : isHovered ? 0.9 : 0.6}
                             strokeDasharray={isCorrelation ? "4 3" : undefined}
-                            opacity={isSelected || isHovered ? 1 : 0.65}
+                            markerEnd="url(#arrowhead)"
                           />
                         </g>
                       );
@@ -625,62 +1031,46 @@ export default function AttackGraphPage() {
                       const isSelected = selectedNodeId === node.id;
                       const isHovered = hoveredNodeId === node.id;
                       const isFinding = node.node_type === "FINDING";
-                      const radius = isFinding ? 22 : 17;
 
                       return (
                         <g
                           key={node.id}
                           transform={`translate(${pos.x}, ${pos.y})`}
-                          className="cursor-pointer transition-transform"
-                          onClick={() => {
-                            setSelectedNodeId(node.id);
-                            setSelectedEdgeId(null);
-                          }}
+                          className="cursor-pointer"
                           onMouseEnter={() => setHoveredNodeId(node.id)}
                           onMouseLeave={() => setHoveredNodeId(null)}
+                          onClick={() => {
+                            setSelectedNodeId(node.id);
+                            if (node.finding_id) {
+                              handleOpenFindingDetail(node.finding_id);
+                            }
+                          }}
                         >
-                          {/* Selection / Hover Glow */}
-                          {(isSelected || isHovered) && (
-                            <circle
-                              r={radius + 6}
-                              fill="none"
-                              stroke={colors.border}
-                              strokeWidth="2"
-                              strokeDasharray="3 3"
-                              className="animate-pulse"
-                            />
-                          )}
-
-                          {/* Node Circle */}
                           <circle
-                            r={radius}
+                            r={isFinding ? 18 : 13}
                             fill={colors.bg}
                             stroke={isSelected ? "#ffffff" : colors.border}
-                            strokeWidth={isSelected ? 2.5 : 1.5}
+                            strokeWidth={isSelected ? 3 : isHovered ? 2.5 : 1.5}
+                            filter="drop-shadow(0 2px 4px rgba(0,0,0,0.4))"
                           />
-
-                          {/* Node Center Icon / Indicator */}
                           <text
                             textAnchor="middle"
-                            dy=".3em"
-                            fill="#ffffff"
+                            dy="4"
                             fontSize={isFinding ? "10" : "8"}
                             fontWeight="bold"
-                            pointerEvents="none"
+                            fill="#ffffff"
                           >
-                            {isFinding ? "⚠️" : node.node_type[0]}
+                            {isFinding ? node.finding_type?.slice(0, 4) || "FND" : node.node_type.slice(0, 3)}
                           </text>
-
-                          {/* Node Text Label */}
                           <text
                             textAnchor="middle"
-                            y={radius + 12}
-                            fill="#cbd5e1"
+                            y={isFinding ? 28 : 22}
                             fontSize="9"
-                            fontWeight={isSelected ? "bold" : "500"}
-                            className="pointer-events-none drop-shadow-md"
+                            fontWeight="500"
+                            fill="currentColor"
+                            className="text-foreground pointer-events-none"
                           >
-                            {node.label.length > 20 ? `${node.label.slice(0, 18)}...` : node.label}
+                            {node.label.length > 22 ? `${node.label.slice(0, 20)}...` : node.label}
                           </text>
                         </g>
                       );
@@ -688,163 +1078,120 @@ export default function AttackGraphPage() {
                   </svg>
                 </div>
               )}
-
-              {/* Legend */}
-              <div className="flex flex-wrap items-center justify-center gap-3 pt-3 border-t border-border/50 text-[10px] text-muted-foreground w-full">
-                <span className="flex items-center gap-1">
-                  <span className="w-2.5 h-2.5 rounded-full bg-rose-500" /> Finding
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="w-2.5 h-2.5 rounded-full bg-sky-500" /> Endpoint
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="w-2.5 h-2.5 rounded-full bg-orange-500" /> Identity
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" /> Resource
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="w-2.5 h-2.5 rounded-full bg-purple-500" /> Workflow
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500" /> Auth
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="w-2.5 h-2.5 rounded-full bg-pink-500" /> Property
-                </span>
-              </div>
             </div>
 
-            {/* Inspector Drawer (4 cols) */}
+            {/* Inspector Drawer for Nodes / Edges (4 cols) */}
             <div className="lg:col-span-4 space-y-4">
-              {/* Selected Edge Explanation */}
               {selectedEdge ? (
-                <Card className="p-4 space-y-3 border-amber-500/30">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 uppercase">
-                      Relationship Link
+                <div className="p-4 rounded-xl border border-purple-500/30 bg-card space-y-3">
+                  <div className="flex items-center justify-between border-b border-border pb-2">
+                    <span className="text-xs font-bold uppercase tracking-wider text-purple-300">
+                      Relationship Detail
                     </span>
-                    <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 uppercase">
-                      {selectedEdge.confidence} Confidence
+                    <button
+                      onClick={() => setSelectedEdgeId(null)}
+                      className="text-xs text-muted-foreground hover:text-foreground"
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  <div>
+                    <span className="text-[10px] text-muted-foreground uppercase font-bold block">Type</span>
+                    <span className="font-mono text-sm font-semibold text-purple-300">
+                      {selectedEdge.relationship_type}
                     </span>
                   </div>
 
                   <div>
-                    <h4 className="text-sm font-bold text-foreground">
-                      {selectedEdge.relationship_type.replace(/_/g, " ")}
-                    </h4>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      Deterministic edge connecting graph elements
+                    <span className="text-[10px] text-muted-foreground uppercase font-bold block">Confidence</span>
+                    <span className="text-xs font-bold text-emerald-400">{selectedEdge.confidence}</span>
+                  </div>
+
+                  <div>
+                    <span className="text-[10px] text-muted-foreground uppercase font-bold block">Source Node</span>
+                    <span className="text-xs text-foreground font-medium">
+                      {selectedEdge.source_label || selectedEdge.source_node_id}
+                    </span>
+                  </div>
+
+                  <div>
+                    <span className="text-[10px] text-muted-foreground uppercase font-bold block">Target Node</span>
+                    <span className="text-xs text-foreground font-medium">
+                      {selectedEdge.target_label || selectedEdge.target_node_id}
+                    </span>
+                  </div>
+
+                  <div className="pt-2 border-t border-border">
+                    <span className="text-[10px] text-muted-foreground uppercase font-bold block mb-1">
+                      Deterministic Explainability Reason
+                    </span>
+                    <p className="text-xs text-purple-200 bg-purple-500/10 p-2.5 rounded border border-purple-500/20 leading-relaxed">
+                      {selectedEdge.reason}
                     </p>
                   </div>
-
-                  {/* Deterministic Explanation Callout */}
-                  <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs text-amber-200 space-y-1">
-                    <strong className="block text-[10px] uppercase tracking-wider text-amber-400 font-bold">
-                      Deterministic Explainability Reason
-                    </strong>
-                    <p>{selectedEdge.reason}</p>
-                  </div>
-
-                  <div className="space-y-1.5 text-xs text-muted-foreground pt-1 border-t border-border/40">
-                    <div>
-                      <span>Source: </span>
-                      <strong className="text-foreground">{selectedEdge.source_label || selectedEdge.source_node_id}</strong>
-                    </div>
-                    <div>
-                      <span>Target: </span>
-                      <strong className="text-foreground">{selectedEdge.target_label || selectedEdge.target_node_id}</strong>
-                    </div>
-                  </div>
-                </Card>
+                </div>
               ) : selectedNode ? (
-                /* Selected Node Details */
-                <Card className="p-4 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-muted text-foreground uppercase">
-                      {selectedNode.node_type}
+                <div className="p-4 rounded-xl border border-border bg-card space-y-3">
+                  <div className="flex items-center justify-between border-b border-border pb-2">
+                    <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                      Node Detail
                     </span>
-                    {selectedNode.finding_severity && (
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-destructive/20 text-destructive uppercase">
-                        {selectedNode.finding_severity}
-                      </span>
-                    )}
+                    <button
+                      onClick={() => setSelectedNodeId(null)}
+                      className="text-xs text-muted-foreground hover:text-foreground"
+                    >
+                      ✕
+                    </button>
                   </div>
 
                   <div>
-                    <h4 className="text-base font-bold text-foreground">{selectedNode.label}</h4>
-                    {selectedNode.finding_type && (
-                      <span className="text-[11px] font-mono text-muted-foreground">
-                        Type: {selectedNode.finding_type}
-                      </span>
-                    )}
-                  </div>
-
-                  {/* Connected Edges & Reasons */}
-                  <div className="space-y-2 pt-2 border-t border-border/40">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground block">
-                      Connected Relationships
+                    <span className="text-[10px] text-muted-foreground uppercase font-bold block">Node Type</span>
+                    <span className="font-mono text-sm font-semibold text-foreground uppercase">
+                      {selectedNode.node_type}
                     </span>
-                    {graphDetail?.edges
-                      .filter((e) => e.source_node_id === selectedNode.id || e.target_node_id === selectedNode.id)
-                      .map((edge) => (
-                        <div
-                          key={edge.id}
-                          className="p-2.5 rounded bg-card/60 border border-border text-xs space-y-1 cursor-pointer hover:border-amber-500/50"
-                          onClick={() => setSelectedEdgeId(edge.id)}
-                        >
-                          <div className="flex items-center justify-between">
-                            <span className="font-semibold text-foreground text-[11px]">
-                              {edge.relationship_type.replace(/_/g, " ")}
-                            </span>
-                            <span className="text-[9px] font-mono px-1 rounded bg-muted text-muted-foreground">
-                              {edge.confidence}
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-muted-foreground line-clamp-2">
-                            {edge.reason}
-                          </p>
-                        </div>
-                      ))}
                   </div>
 
-                  {selectedNode.metadata && Object.keys(selectedNode.metadata).length > 0 && (
-                    <div className="space-y-1 pt-2 border-t border-border/40">
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground block">
-                        Node Metadata
-                      </span>
-                      <pre className="p-2 bg-background border border-input rounded text-[10px] font-mono overflow-x-auto max-h-36 whitespace-pre-wrap text-foreground">
-                        {JSON.stringify(selectedNode.metadata, null, 2)}
-                      </pre>
+                  <div>
+                    <span className="text-[10px] text-muted-foreground uppercase font-bold block">Label</span>
+                    <span className="text-sm font-medium text-foreground">{selectedNode.label}</span>
+                  </div>
+
+                  {selectedNode.finding_id && (
+                    <div className="pt-2">
+                      <Button
+                        size="sm"
+                        onClick={() => handleOpenFindingDetail(selectedNode.finding_id!)}
+                        className="w-full text-xs bg-indigo-600 hover:bg-indigo-500 text-white"
+                      >
+                        Inspect Finding Record →
+                      </Button>
                     </div>
                   )}
-                </Card>
+                </div>
               ) : (
-                /* Default Info Drawer */
-                <Card className="p-6 text-center text-xs text-muted-foreground space-y-2 border-dashed">
-                  <div className="text-2xl">🔍</div>
-                  <div className="font-semibold text-foreground">Inspect Attack Graph</div>
-                  <p>Click on any node or edge in the graph to view detailed explainability context, deterministic reasons, and vulnerability attributes.</p>
-                </Card>
+                <div className="p-8 text-center text-xs text-muted-foreground border border-dashed border-border rounded-xl">
+                  Select a node or relationship edge in the graph canvas to inspect explainability details.
+                </div>
               )}
             </div>
           </div>
         )}
 
-        {/* View Tab 2: Correlations Table */}
+        {/* View Tab 3: Correlations Table */}
         {viewTab === "correlations" && (
           <div className="space-y-3">
             <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <span>Deterministic pairwise relationships identified between confirmed findings</span>
+              <span>All deterministic pairwise finding correlations</span>
               <span>Total: {correlations.length}</span>
             </div>
 
             {correlations.length === 0 ? (
               <div className="text-center py-12 text-xs text-muted-foreground border border-dashed border-border rounded-lg">
-                No correlations recorded yet for this project.
+                No correlations recorded yet. Click &quot;Run Correlation&quot; to evaluate confirmed findings.
               </div>
             ) : (
-              <div className="space-y-2">
+              <div className="space-y-3">
                 {correlations.map((corr) => (
                   <div
                     key={corr.id}
@@ -895,7 +1242,7 @@ export default function AttackGraphPage() {
           </div>
         )}
 
-        {/* View Tab 3: Nodes Table */}
+        {/* View Tab 4: Nodes Table */}
         {viewTab === "nodes" && (
           <div className="space-y-3">
             <div className="flex items-center justify-between text-xs text-muted-foreground">
@@ -948,6 +1295,153 @@ export default function AttackGraphPage() {
           </div>
         )}
       </Card>
+
+      {/* Finding Detail Inspection Modal / Drawer */}
+      {selectedFindingId && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-card border border-border rounded-xl max-w-2xl w-full max-h-[85vh] overflow-y-auto p-6 space-y-5 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-border pb-3">
+              <div className="flex items-center gap-2">
+                <span className="text-lg">🛡️</span>
+                <h2 className="text-base font-bold text-foreground">
+                  Finding Security Detail
+                </h2>
+              </div>
+              <button
+                onClick={() => {
+                  setSelectedFindingId(null);
+                  setFindingDetail(null);
+                }}
+                className="text-muted-foreground hover:text-foreground text-sm font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            {loadingFindingDetail ? (
+              <div className="text-center py-12 text-sm text-muted-foreground">
+                <span className="inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin mr-2" />
+                Loading finding details...
+              </div>
+            ) : findingDetail ? (
+              <div className="space-y-4 text-xs">
+                {/* Header Information */}
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span
+                      className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border uppercase ${getFindingSeverityBadge(
+                        findingDetail.severity
+                      )}`}
+                    >
+                      {findingDetail.severity}
+                    </span>
+                    <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-muted text-foreground uppercase">
+                      {findingDetail.type}
+                    </span>
+                    <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 uppercase">
+                      {findingDetail.confidence} Confidence
+                    </span>
+                  </div>
+                  <h3 className="text-sm font-bold text-foreground mt-1">{findingDetail.title}</h3>
+                </div>
+
+                {/* Description */}
+                <div className="p-3 rounded-lg bg-muted/30 border border-border/60">
+                  <span className="text-[10px] uppercase font-bold text-muted-foreground block mb-1">
+                    Vulnerability Description
+                  </span>
+                  <p className="text-foreground leading-relaxed">{findingDetail.description}</p>
+                </div>
+
+                {/* Target Context */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <div className="p-2.5 rounded bg-muted/20 border border-border/40">
+                    <span className="text-[10px] text-muted-foreground block font-bold">ENDPOINT</span>
+                    <span className="font-mono text-foreground font-semibold">
+                      {findingDetail.endpoint?.path || (findingDetail.endpoint_id ? `#${findingDetail.endpoint_id}` : "-")}
+                    </span>
+                  </div>
+                  <div className="p-2.5 rounded bg-muted/20 border border-border/40">
+                    <span className="text-[10px] text-muted-foreground block font-bold">ATTACKER IDENTITY</span>
+                    <span className="text-foreground font-semibold">
+                      {findingDetail.attacker_identity?.name || (findingDetail.attacker_identity_id ? `#${findingDetail.attacker_identity_id}` : "-")}
+                    </span>
+                  </div>
+                  <div className="p-2.5 rounded bg-muted/20 border border-border/40">
+                    <span className="text-[10px] text-muted-foreground block font-bold">RESOURCE</span>
+                    <span className="text-foreground font-semibold">
+                      {findingDetail.resource?.name || (findingDetail.resource_id ? `#${findingDetail.resource_id}` : "-")}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Expected vs Actual Behavior */}
+                {(findingDetail.expected_authorization || findingDetail.actual_behavior) && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {findingDetail.expected_authorization && (
+                      <div className="p-2.5 rounded bg-muted/20 border border-border/40">
+                        <span className="text-[10px] text-muted-foreground block font-bold">EXPECTED AUTHORIZATION</span>
+                        <span className="text-foreground">{findingDetail.expected_authorization}</span>
+                      </div>
+                    )}
+                    {findingDetail.actual_behavior && (
+                      <div className="p-2.5 rounded bg-muted/20 border border-border/40">
+                        <span className="text-[10px] text-muted-foreground block font-bold">ACTUAL BEHAVIOR</span>
+                        <span className="text-foreground">{findingDetail.actual_behavior}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Exposed Properties (if any) */}
+                {findingDetail.exposed_properties && (
+                  <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20">
+                    <span className="text-[10px] font-bold text-amber-300 block mb-1 uppercase">
+                      Exposed Resource Properties
+                    </span>
+                    <pre className="font-mono text-xs text-amber-200 whitespace-pre-wrap">
+                      {findingDetail.exposed_properties}
+                    </pre>
+                  </div>
+                )}
+
+                {/* Remediation */}
+                <div className="p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/20">
+                  <span className="text-[10px] font-bold text-emerald-300 block mb-1 uppercase">
+                    Remediation Advice
+                  </span>
+                  <p className="text-emerald-200 leading-relaxed">{findingDetail.remediation}</p>
+                </div>
+
+                {/* Actions / Evidence Link */}
+                <div className="flex items-center justify-between pt-2 border-t border-border">
+                  <Link
+                    href={`/findings`}
+                    className="text-xs text-indigo-400 hover:underline font-semibold"
+                  >
+                    View in Findings Management →
+                  </Link>
+
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      setSelectedFindingId(null);
+                      setFindingDetail(null);
+                    }}
+                  >
+                    Close Inspector
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="text-center py-8 text-xs text-muted-foreground">
+                Finding details could not be retrieved.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

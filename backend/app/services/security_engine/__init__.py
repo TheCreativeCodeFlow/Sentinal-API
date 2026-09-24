@@ -13,6 +13,7 @@ from app.services.security_engine.workflow_engine import WorkflowEngine
 from app.services.security_engine.workflow_attack_generator import WorkflowAttackGenerator
 from app.services.security_engine.workflow_attack_engine import WorkflowAttackEngine
 from app.services.security_engine.correlation_engine import CorrelationEngine
+from app.services.security_engine.attack_path_engine import AttackPathEngine
 
 __all__ = [
     "AsyncSecurityHttpClient",
@@ -26,6 +27,7 @@ __all__ = [
     "WorkflowAttackGenerator",
     "WorkflowAttackEngine",
     "CorrelationEngine",
+    "AttackPathEngine",
     "redact_headers",
     "redact_text",
 ]

@@ -48,6 +48,7 @@ class Project(Base):
     workflows = relationship("Workflow", back_populates="project", cascade="all, delete-orphan")
     attack_graphs = relationship("AttackGraph", back_populates="project", cascade="all, delete-orphan")
     correlations = relationship("FindingCorrelation", back_populates="project", cascade="all, delete-orphan")
+    attack_paths = relationship("AttackPath", back_populates="project", cascade="all, delete-orphan")
 
 
 class API(Base):
@@ -332,6 +333,7 @@ class Finding(Base):
     attacker_role = relationship("Role", foreign_keys=[attacker_role_id])
     resource = relationship("Resource", foreign_keys=[resource_id])
     graph_nodes = relationship("AttackGraphNode", back_populates="finding")
+    path_steps = relationship("AttackPathStep", foreign_keys="AttackPathStep.finding_id", back_populates="finding")
 
     __table_args__ = (
         Index("ix_findings_project_severity", "project_id", "severity"),
@@ -814,6 +816,7 @@ class AttackGraph(Base):
     project = relationship("Project", back_populates="attack_graphs")
     nodes = relationship("AttackGraphNode", back_populates="graph", cascade="all, delete-orphan")
     edges = relationship("AttackGraphEdge", back_populates="graph", cascade="all, delete-orphan")
+    attack_paths = relationship("AttackPath", back_populates="attack_graph", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("ix_attack_graphs_project_status", "project_id", "status"),
@@ -883,3 +886,68 @@ class FindingCorrelation(Base):
     __table_args__ = (
         Index("ix_finding_correlations_pair_rel", "project_id", "finding_a_id", "finding_b_id", "relationship_type", unique=True),
     )
+
+
+# ==============================================================================
+# STAGE 8.2: Deterministic Attack Path Detection Models
+# ==============================================================================
+
+class AttackPath(Base):
+    __tablename__ = "attack_paths"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    attack_graph_id = Column(String(36), ForeignKey("attack_graphs.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    status = Column(String(50), nullable=False, default="ACTIVE", index=True)  # ACTIVE, ARCHIVED
+    confidence = Column(String(50), nullable=False, default="HIGH", index=True)  # HIGH, MEDIUM, LOW
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    project = relationship("Project", back_populates="attack_paths")
+    attack_graph = relationship("AttackGraph", back_populates="attack_paths")
+    steps = relationship(
+        "AttackPathStep",
+        back_populates="attack_path",
+        cascade="all, delete-orphan",
+        order_by="AttackPathStep.position",
+    )
+
+    __table_args__ = (
+        Index("ix_attack_paths_project_status", "project_id", "status"),
+        Index("ix_attack_paths_graph", "attack_graph_id"),
+    )
+
+
+class AttackPathStep(Base):
+    __tablename__ = "attack_path_steps"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    attack_path_id = Column(String(36), ForeignKey("attack_paths.id", ondelete="CASCADE"), nullable=False, index=True)
+    position = Column(Integer, nullable=False)
+    finding_id = Column(String(36), ForeignKey("findings.id", ondelete="CASCADE"), nullable=False, index=True)
+    prerequisite_finding_id = Column(String(36), ForeignKey("findings.id", ondelete="SET NULL"), nullable=True, index=True)
+    relationship_type = Column(String(100), nullable=False)
+    reason = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    attack_path = relationship("AttackPath", back_populates="steps")
+    finding = relationship("Finding", foreign_keys=[finding_id], back_populates="path_steps")
+    prerequisite_finding = relationship("Finding", foreign_keys=[prerequisite_finding_id])
+
+    __table_args__ = (
+        Index("ix_attack_path_steps_path_pos", "attack_path_id", "position", unique=True),
+        Index("ix_attack_path_steps_path_finding", "attack_path_id", "finding_id"),
+    )
+
+
+# Prevent pytest from treating model classes as test case classes
+AttackGraph.__test__ = False
+AttackGraphNode.__test__ = False
+AttackGraphEdge.__test__ = False
+FindingCorrelation.__test__ = False
+AttackPath.__test__ = False
+AttackPathStep.__test__ = False

@@ -1032,3 +1032,60 @@ class CorrelationRunResponse(BaseModel):
     edge_count: int
     correlations: List[FindingCorrelationInDB] = []
     graph: Optional[AttackGraphInDB] = None
+
+
+# ==============================================================================
+# STAGE 8.2: Deterministic Attack Path Detection Schemas
+# ==============================================================================
+
+class AttackPathStepBase(BaseModel):
+    position: int
+    finding_id: str
+    prerequisite_finding_id: Optional[str] = None
+    relationship_type: str
+    reason: str
+
+
+class AttackPathStepInDB(AttackPathStepBase):
+    id: str
+    attack_path_id: str
+    created_at: datetime
+    finding_title: Optional[str] = None
+    finding_type: Optional[str] = None
+    finding_severity: Optional[str] = None
+    prerequisite_finding_title: Optional[str] = None
+    endpoint_path: Optional[str] = None
+    resource_name: Optional[str] = None
+    identity_name: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AttackPathBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = Field(None, max_length=5000)
+    status: str = Field("ACTIVE", max_length=50)
+    confidence: str = Field("HIGH", max_length=50)
+
+
+class AttackPathInDB(AttackPathBase):
+    id: str
+    project_id: int
+    attack_graph_id: str
+    created_at: datetime
+    updated_at: datetime
+    step_count: Optional[int] = 0
+    steps: List[AttackPathStepInDB] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AttackPathDetailInDB(AttackPathInDB):
+    pass
+
+
+class AttackPathAnalysisResponse(BaseModel):
+    project_id: int
+    attack_graph_id: str
+    paths_count: int
+    paths: List[AttackPathDetailInDB] = []
