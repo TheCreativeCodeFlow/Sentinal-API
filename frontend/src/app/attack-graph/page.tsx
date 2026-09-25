@@ -141,6 +141,34 @@ interface FindingDetailItem {
   resource?: { name: string; resource_type: string } | null;
 }
 
+interface SecurityImpactItem {
+  id: string;
+  project_id: number;
+  attack_path_id?: string | null;
+  finding_id?: string | null;
+  initial_access: boolean;
+  authentication_boundary_crossed: boolean;
+  authorization_boundary_crossed: boolean;
+  identity_boundary_crossed: boolean;
+  resource_boundary_crossed: boolean;
+  workflow_boundary_crossed: boolean;
+  property_boundary_crossed: boolean;
+  sensitive_data_reached: boolean;
+  cross_identity_impact: boolean;
+  cross_resource_impact: boolean;
+  terminal_impact: string;
+  explanation: string;
+  created_at: string;
+  updated_at: string;
+  attack_path_name?: string | null;
+  finding_title?: string | null;
+  finding_type?: string | null;
+  identities_involved: string[];
+  resources_involved: string[];
+  sensitive_properties_reached: string[];
+  boundaries_crossed: string[];
+}
+
 export default function AttackGraphPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null);
@@ -148,11 +176,14 @@ export default function AttackGraphPage() {
   const [graphDetail, setGraphDetail] = useState<AttackGraphDetailItem | null>(null);
   const [correlations, setCorrelations] = useState<FindingCorrelationItem[]>([]);
   const [attackPaths, setAttackPaths] = useState<AttackPathItem[]>([]);
+  const [securityImpacts, setSecurityImpacts] = useState<SecurityImpactItem[]>([]);
 
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const [analyzingPaths, setAnalyzingPaths] = useState(false);
+  const [analyzingImpact, setAnalyzingImpact] = useState(false);
   const [rebuildingPathId, setRebuildingPathId] = useState<string | null>(null);
+  const [rebuildingImpactId, setRebuildingImpactId] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
@@ -162,7 +193,8 @@ export default function AttackGraphPage() {
   const [loadingFindingDetail, setLoadingFindingDetail] = useState(false);
 
   // Filters & Selected elements
-  const [viewTab, setViewTab] = useState<"paths" | "graph" | "correlations" | "nodes">("paths");
+  const [viewTab, setViewTab] = useState<"impacts" | "paths" | "graph" | "correlations" | "nodes">("impacts");
+  const [impactFilter, setImpactFilter] = useState<string>("ALL");
   const [pathConfidenceFilter, setPathConfidenceFilter] = useState<string>("ALL");
   const [relFilter, setRelFilter] = useState<string>("ALL");
   const [nodeTypeFilter, setNodeTypeFilter] = useState<string>("ALL");
@@ -229,6 +261,13 @@ export default function AttackGraphPage() {
         if (pathsRes.ok) {
           const pathsData: AttackPathItem[] = await pathsRes.json();
           setAttackPaths(pathsData);
+        }
+
+        // Load security impacts (Stage 8.3)
+        const impactsRes = await fetch(`/api/v1/projects/${selectedProjectId}/security-impacts`, { credentials: "include" });
+        if (impactsRes.ok) {
+          const impactsData: SecurityImpactItem[] = await impactsRes.json();
+          setSecurityImpacts(impactsData);
         }
       } catch (err: unknown) {
         setErrorMsg(err instanceof Error ? err.message : "Failed to load attack graph data");
@@ -308,6 +347,37 @@ export default function AttackGraphPage() {
     }
   };
 
+  // Run Security Impact Analysis (Stage 8.3)
+  const handleRunImpactAnalysis = async () => {
+    if (!selectedProjectId) return;
+    try {
+      setAnalyzingImpact(true);
+      setErrorMsg(null);
+      setSuccessMsg(null);
+
+      const res = await fetch(`/api/v1/projects/${selectedProjectId}/impact-analysis/run`, {
+        method: "POST",
+        credentials: "include",
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || "Failed to run security impact analysis");
+      }
+
+      const data = await res.json();
+      setSecurityImpacts(data.impacts);
+      setSuccessMsg(
+        `Security impact analysis complete: evaluated ${data.impacts_count} impact dimensions across confirmed findings and attack paths.`
+      );
+      setViewTab("impacts");
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : "Failed to run impact analysis");
+    } finally {
+      setAnalyzingImpact(false);
+    }
+  };
+
   // Rebuild specific attack path
   const handleRebuildPath = async (pathId: string) => {
     try {
@@ -331,6 +401,32 @@ export default function AttackGraphPage() {
       setErrorMsg(err instanceof Error ? err.message : "Failed to rebuild attack path");
     } finally {
       setRebuildingPathId(null);
+    }
+  };
+
+  // Rebuild specific security impact (Stage 8.3)
+  const handleRebuildImpact = async (impactId: string) => {
+    try {
+      setRebuildingImpactId(impactId);
+      setErrorMsg(null);
+
+      const res = await fetch(`/api/v1/security-impacts/${impactId}/rebuild`, {
+        method: "POST",
+        credentials: "include",
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || "Failed to rebuild security impact");
+      }
+
+      const updatedImpact: SecurityImpactItem = await res.json();
+      setSecurityImpacts((prev) => prev.map((i) => (i.id === impactId ? updatedImpact : i)));
+      setSuccessMsg(`Security impact record rebuilt and re-evaluated offline.`);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : "Failed to rebuild security impact");
+    } finally {
+      setRebuildingImpactId(null);
     }
   };
 
@@ -402,6 +498,16 @@ export default function AttackGraphPage() {
       return true;
     });
   }, [attackPaths, pathConfidenceFilter]);
+
+  // Filtered security impacts (Stage 8.3)
+  const filteredSecurityImpacts = useMemo(() => {
+    return securityImpacts.filter((imp) => {
+      if (impactFilter !== "ALL" && imp.terminal_impact !== impactFilter) {
+        return false;
+      }
+      return true;
+    });
+  }, [securityImpacts, impactFilter]);
 
   // Selected node and edge items
   const selectedNode = useMemo(() => {
@@ -533,6 +639,45 @@ export default function AttackGraphPage() {
     }
   };
 
+  // Visual boundary badge style helper (Stage 8.3)
+  const getBoundaryBadge = (boundary: string) => {
+    switch (boundary.toUpperCase()) {
+      case "AUTH":
+      case "AUTHENTICATION":
+        return "bg-amber-500/20 text-amber-300 border-amber-500/40";
+      case "AUTHORIZATION":
+        return "bg-rose-500/20 text-rose-300 border-rose-500/40";
+      case "IDENTITY":
+        return "bg-orange-500/20 text-orange-300 border-orange-500/40";
+      case "RESOURCE":
+        return "bg-emerald-500/20 text-emerald-300 border-emerald-500/40";
+      case "WORKFLOW":
+        return "bg-purple-500/20 text-purple-300 border-purple-500/40";
+      case "PROPERTY":
+        return "bg-cyan-500/20 text-cyan-300 border-cyan-500/40";
+      default:
+        return "bg-slate-500/20 text-slate-300 border-slate-500/40";
+    }
+  };
+
+  // Terminal impact badge style helper (Stage 8.3)
+  const getTerminalImpactBadge = (terminalImpact: string) => {
+    switch (terminalImpact.toUpperCase()) {
+      case "MULTI_BOUNDARY_ACCESS":
+        return "bg-red-500/20 text-red-300 border-red-500/40 shadow-sm shadow-red-500/10 font-bold";
+      case "PRIVILEGED_WORKFLOW_ACCESS":
+        return "bg-purple-500/20 text-purple-300 border-purple-500/40 font-bold";
+      case "CROSS_IDENTITY_ACCESS":
+        return "bg-orange-500/20 text-orange-300 border-orange-500/40 font-bold";
+      case "SENSITIVE_PROPERTY_EXPOSURE":
+        return "bg-amber-500/20 text-amber-300 border-amber-500/40 font-bold";
+      case "RESOURCE_ACCESS":
+        return "bg-blue-500/20 text-blue-300 border-blue-500/40 font-bold";
+      default:
+        return "bg-muted text-muted-foreground border-border";
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Top Header */}
@@ -540,19 +685,19 @@ export default function AttackGraphPage() {
         <div>
           <div className="flex items-center gap-2.5">
             <h1 className="text-2xl font-bold tracking-tight text-foreground">
-              Deterministic Attack Graph & Attack Path Detection
+              Deterministic Attack Graph & Security Impact Analysis
             </h1>
-            <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30 uppercase">
-              Stage 8.2
+            <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30 uppercase">
+              Stage 8.3
             </span>
           </div>
           <p className="text-sm text-muted-foreground mt-1">
-            Convert finding correlations into explainable, ordered security exploit chains without target traffic.
+            Analyze confirmed findings and attack paths to expose concrete security boundaries and terminal impact dimensions without target traffic.
           </p>
         </div>
 
         {/* Project Selector & Actions */}
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center gap-2.5 flex-wrap">
           <div className="flex items-center gap-2">
             <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground whitespace-nowrap">
               Project:
@@ -609,6 +754,25 @@ export default function AttackGraphPage() {
               </span>
             )}
           </Button>
+
+          <Button
+            size="sm"
+            onClick={handleRunImpactAnalysis}
+            disabled={analyzingImpact || !selectedProjectId}
+            className="bg-rose-600 hover:bg-rose-500 text-white font-medium"
+          >
+            {analyzingImpact ? (
+              <span className="flex items-center gap-1.5">
+                <span className="inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                Analyzing Impact...
+              </span>
+            ) : (
+              <span className="flex items-center gap-1.5">
+                <span>🎯</span>
+                Analyze Impact
+              </span>
+            )}
+          </Button>
         </div>
       </div>
 
@@ -617,7 +781,7 @@ export default function AttackGraphPage() {
         <div className="flex items-start gap-2">
           <span className="text-base font-bold">🛡️</span>
           <div>
-            <strong className="font-semibold text-purple-200">Analytical Safety Guarantee:</strong> Finding correlation and attack path detection operate strictly on confirmed findings without executing requests against the target API. No AI or probabilistic inference is used; all relationships and attack chains are derived through deterministic domain rules.
+            <strong className="font-semibold text-purple-200">Analytical Safety Guarantee:</strong> Security impact analysis, attack path detection, and finding correlation operate strictly on confirmed findings without executing requests against the target API. No AI or probabilistic inference is used; all boundaries crossed, terminal impacts, and sequential exploit chains are derived through deterministic domain rules.
           </div>
         </div>
       </div>
@@ -641,7 +805,7 @@ export default function AttackGraphPage() {
       )}
 
       {/* Metrics Cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
         <div className="bg-card border border-border rounded-lg p-3.5">
           <span className="text-[10px] uppercase text-muted-foreground block font-bold">Total Confirmed Findings</span>
           <span className="text-2xl font-bold text-foreground">
@@ -656,6 +820,10 @@ export default function AttackGraphPage() {
           <span className="text-[10px] uppercase text-indigo-400 block font-bold">Confirmed Attack Paths</span>
           <span className="text-2xl font-bold text-indigo-400">{attackPaths.length}</span>
         </div>
+        <div className="bg-card border border-rose-500/40 rounded-lg p-3.5 bg-rose-500/5">
+          <span className="text-[10px] uppercase text-rose-400 block font-bold">Security Impacts</span>
+          <span className="text-2xl font-bold text-rose-400">{securityImpacts.length}</span>
+        </div>
         <div className="bg-card border border-border rounded-lg p-3.5">
           <span className="text-[10px] uppercase text-muted-foreground block font-bold">Attack Graph Nodes</span>
           <span className="text-2xl font-bold text-foreground">{graphDetail?.nodes.length || 0}</span>
@@ -667,6 +835,17 @@ export default function AttackGraphPage() {
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-border pb-3">
           {/* Subnav Tabs */}
           <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => setViewTab("impacts")}
+              className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors flex items-center gap-1.5 ${
+                viewTab === "impacts"
+                  ? "bg-rose-600 text-white"
+                  : "bg-muted text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <span>🎯</span>
+              Impact Analysis ({securityImpacts.length})
+            </button>
             <button
               onClick={() => setViewTab("paths")}
               className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors flex items-center gap-1.5 ${
@@ -711,7 +890,24 @@ export default function AttackGraphPage() {
           </div>
 
           {/* Contextual Filters */}
-          {viewTab === "paths" ? (
+          {viewTab === "impacts" ? (
+            <div className="flex items-center gap-2 text-xs">
+              <span className="text-muted-foreground">Terminal Impact:</span>
+              <select
+                className="h-8 px-2 bg-background border border-input rounded text-xs outline-none"
+                value={impactFilter}
+                onChange={(e) => setImpactFilter(e.target.value)}
+              >
+                <option value="ALL">All Terminal Impacts ({securityImpacts.length})</option>
+                <option value="MULTI_BOUNDARY_ACCESS">MULTI_BOUNDARY_ACCESS</option>
+                <option value="PRIVILEGED_WORKFLOW_ACCESS">PRIVILEGED_WORKFLOW_ACCESS</option>
+                <option value="CROSS_IDENTITY_ACCESS">CROSS_IDENTITY_ACCESS</option>
+                <option value="SENSITIVE_PROPERTY_EXPOSURE">SENSITIVE_PROPERTY_EXPOSURE</option>
+                <option value="RESOURCE_ACCESS">RESOURCE_ACCESS</option>
+                <option value="NONE">NONE</option>
+              </select>
+            </div>
+          ) : viewTab === "paths" ? (
             <div className="flex items-center gap-2 text-xs">
               <span className="text-muted-foreground">Confidence:</span>
               <select
@@ -761,6 +957,244 @@ export default function AttackGraphPage() {
           )}
         </div>
 
+        {/* View Tab: Impact Analysis (Stage 8.3) */}
+        {viewTab === "impacts" && (
+          <div className="space-y-6">
+            {/* Core Distinction Callout */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+              <div className="p-3.5 rounded-lg border border-emerald-500/30 bg-emerald-500/5 space-y-1">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-emerald-400 font-bold">✓</span>
+                  <span className="font-bold text-emerald-300 uppercase tracking-wide text-[10px]">
+                    Confirmed Analytical Facts (Evidence)
+                  </span>
+                </div>
+                <p className="text-muted-foreground leading-relaxed">
+                  Concrete security facts validated during testing: initial access gained, verified boundary crossings (Authentication, Authorization, Identity, Resource, Workflow, Property), sensitive or secret properties exposed, and verified multi-user or multi-resource traversal.
+                </p>
+              </div>
+              <div className="p-3.5 rounded-lg border border-purple-500/30 bg-purple-500/5 space-y-1">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-purple-400 font-bold">🎯</span>
+                  <span className="font-bold text-purple-300 uppercase tracking-wide text-[10px]">
+                    Deterministic Security Impact (Interpretation)
+                  </span>
+                </div>
+                <p className="text-muted-foreground leading-relaxed">
+                  Terminal impact categorization derived purely through deterministic boundary logic (no subjective severity scores or probabilistic guessing): Resource Access, Sensitive Property Exposure, Cross-Identity Access, Privileged Workflow Access, or Multi-Boundary Access.
+                </p>
+              </div>
+            </div>
+
+            {/* Security Impacts List */}
+            {filteredSecurityImpacts.length === 0 ? (
+              <div className="text-center py-16 space-y-3 border border-dashed border-border rounded-xl">
+                <div className="text-3xl">🎯</div>
+                <div className="font-semibold text-sm text-foreground">No Security Impacts Analyzed</div>
+                <p className="text-xs text-muted-foreground max-w-sm mx-auto">
+                  Click <strong>Analyze Impact</strong> to evaluate concrete boundary crossings and terminal security impacts for this project.
+                </p>
+                <Button
+                  size="sm"
+                  onClick={handleRunImpactAnalysis}
+                  disabled={analyzingImpact || !selectedProjectId}
+                  className="bg-rose-600 hover:bg-rose-500 text-white font-medium"
+                >
+                  Analyze Security Impact Now
+                </Button>
+              </div>
+            ) : (
+              <div className="space-y-5">
+                {filteredSecurityImpacts.map((impact) => (
+                  <div
+                    key={impact.id}
+                    className="p-5 rounded-xl border border-border bg-card/70 space-y-4 shadow-sm"
+                  >
+                    {/* Header: Title, Terminal Impact Badge, Rebuild */}
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-border/60 pb-3">
+                      <div className="space-y-1.5">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-muted text-muted-foreground uppercase">
+                            {impact.attack_path_id ? "ATTACK PATH IMPACT" : "STANDALONE FINDING IMPACT"}
+                          </span>
+                          <span
+                            className={`text-[10px] font-mono font-bold px-2.5 py-0.5 rounded-full border uppercase ${getTerminalImpactBadge(
+                              impact.terminal_impact
+                            )}`}
+                          >
+                            Terminal Impact: {impact.terminal_impact.replace(/_/g, " ")}
+                          </span>
+                        </div>
+                        <h3 className="text-sm font-bold text-foreground">
+                          {impact.attack_path_name || impact.finding_title || `Impact Assessment #${impact.id.slice(0, 8)}`}
+                        </h3>
+                      </div>
+
+                      {/* Rebuild Impact Button */}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handleRebuildImpact(impact.id)}
+                        disabled={rebuildingImpactId === impact.id}
+                        className="text-xs h-7 px-2.5 border-border hover:bg-muted"
+                      >
+                        {rebuildingImpactId === impact.id ? (
+                          <span className="flex items-center gap-1">
+                            <span className="inline-block w-2.5 h-2.5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                            Rebuilding...
+                          </span>
+                        ) : (
+                          "Re-evaluate Impact"
+                        )}
+                      </Button>
+                    </div>
+
+                    {/* Visual Boundary Indicators Bar */}
+                    <div className="space-y-1.5">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground block">
+                        Security Boundaries Crossed
+                      </span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {impact.boundaries_crossed && impact.boundaries_crossed.length > 0 ? (
+                          impact.boundaries_crossed.map((boundary) => (
+                            <span
+                              key={boundary}
+                              className={`text-[10px] font-mono font-bold px-2.5 py-1 rounded border uppercase ${getBoundaryBadge(
+                                boundary
+                              )}`}
+                            >
+                              🛡️ {boundary} BOUNDARY
+                            </span>
+                          ))
+                        ) : (
+                          <span className="text-xs text-muted-foreground italic">No security boundaries crossed</span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Two-Column Comparison: Confirmed Facts vs Analytical Impact */}
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 pt-1">
+                      {/* Left Column: Confirmed Analytical Facts */}
+                      <div className="p-3.5 rounded-lg border border-border/70 bg-background/50 space-y-3">
+                        <span className="text-[11px] font-bold uppercase tracking-wide text-foreground block border-b border-border/40 pb-1.5">
+                          1. Confirmed Facts (Evidence)
+                        </span>
+
+                        <div className="grid grid-cols-2 gap-2 text-xs">
+                          <div className="p-2 rounded bg-muted/20 border border-border/30">
+                            <span className="text-[10px] text-muted-foreground block font-bold">INITIAL ACCESS</span>
+                            <span className={`font-semibold ${impact.initial_access ? "text-amber-400" : "text-muted-foreground"}`}>
+                              {impact.initial_access ? "YES (Auth Flaw)" : "NO"}
+                            </span>
+                          </div>
+
+                          <div className="p-2 rounded bg-muted/20 border border-border/30">
+                            <span className="text-[10px] text-muted-foreground block font-bold">SENSITIVE DATA</span>
+                            <span className={`font-semibold ${impact.sensitive_data_reached ? "text-red-400" : "text-muted-foreground"}`}>
+                              {impact.sensitive_data_reached ? "YES (Exposed)" : "NO"}
+                            </span>
+                          </div>
+
+                          <div className="p-2 rounded bg-muted/20 border border-border/30">
+                            <span className="text-[10px] text-muted-foreground block font-bold">CROSS IDENTITY</span>
+                            <span className={`font-semibold ${impact.cross_identity_impact ? "text-orange-400" : "text-muted-foreground"}`}>
+                              {impact.cross_identity_impact ? "YES (Multi-User)" : "NO"}
+                            </span>
+                          </div>
+
+                          <div className="p-2 rounded bg-muted/20 border border-border/30">
+                            <span className="text-[10px] text-muted-foreground block font-bold">CROSS RESOURCE</span>
+                            <span className={`font-semibold ${impact.cross_resource_impact ? "text-emerald-400" : "text-muted-foreground"}`}>
+                              {impact.cross_resource_impact ? "YES (Multi-Resource)" : "NO"}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Sensitive properties if reached */}
+                        {impact.sensitive_properties_reached && impact.sensitive_properties_reached.length > 0 && (
+                          <div className="p-2 rounded bg-amber-500/10 border border-amber-500/20 text-xs">
+                            <span className="text-[10px] font-bold text-amber-300 uppercase block mb-1">
+                              Sensitive Properties Exposed
+                            </span>
+                            <div className="flex flex-wrap gap-1.5">
+                              {impact.sensitive_properties_reached.map((prop) => (
+                                <span key={prop} className="font-mono text-[10px] bg-amber-500/20 text-amber-200 px-1.5 py-0.5 rounded">
+                                  {prop}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Identities & Resources involved */}
+                        <div className="space-y-1.5 text-xs text-muted-foreground">
+                          {impact.identities_involved && impact.identities_involved.length > 0 && (
+                            <div>
+                              <span className="font-bold text-foreground">Identities: </span>
+                              {impact.identities_involved.join(", ")}
+                            </div>
+                          )}
+                          {impact.resources_involved && impact.resources_involved.length > 0 && (
+                            <div>
+                              <span className="font-bold text-foreground">Resources: </span>
+                              {impact.resources_involved.join(", ")}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Source link */}
+                        <div className="pt-1">
+                          {impact.finding_id && (
+                            <button
+                              onClick={() => handleOpenFindingDetail(impact.finding_id!)}
+                              className="text-xs text-indigo-400 hover:underline font-semibold"
+                            >
+                              Inspect Source Finding Details →
+                            </button>
+                          )}
+                          {impact.attack_path_id && (
+                            <button
+                              onClick={() => setViewTab("paths")}
+                              className="text-xs text-indigo-400 hover:underline font-semibold"
+                            >
+                              View in Attack Paths Chain →
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Right Column: Deterministic Security Impact */}
+                      <div className="p-3.5 rounded-lg border border-indigo-500/20 bg-indigo-500/5 space-y-3">
+                        <span className="text-[11px] font-bold uppercase tracking-wide text-indigo-300 block border-b border-indigo-500/30 pb-1.5">
+                          2. Security Impact (Deterministic Interpretation)
+                        </span>
+
+                        <div className="p-3 rounded-lg bg-background/80 border border-border/60 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] font-bold uppercase text-muted-foreground">
+                              Terminal Impact Classification
+                            </span>
+                            <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border uppercase ${getTerminalImpactBadge(impact.terminal_impact)}`}>
+                              {impact.terminal_impact}
+                            </span>
+                          </div>
+                          <p className="text-xs text-foreground leading-relaxed">
+                            {impact.explanation}
+                          </p>
+                        </div>
+
+                        <div className="text-[11px] text-muted-foreground leading-relaxed">
+                          <strong className="text-foreground">Deterministic Derivation:</strong> This security impact was derived strictly from verified testing results without AI, LLMs, or subjective risk scoring.
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* View Tab 1: Attack Paths View (Stage 8.2) */}
         {viewTab === "paths" && (
           <div className="space-y-6">
@@ -803,7 +1237,9 @@ export default function AttackGraphPage() {
               </div>
             ) : (
               <div className="space-y-5">
-                {filteredAttackPaths.map((path) => (
+                {filteredAttackPaths.map((path) => {
+                  const matchedImpact = securityImpacts.find((imp) => imp.attack_path_id === path.id);
+                  return (
                   <div
                     key={path.id}
                     className="p-5 rounded-xl border border-border bg-card/70 space-y-4 shadow-sm"
@@ -822,6 +1258,15 @@ export default function AttackGraphPage() {
                           >
                             {path.confidence} Confidence
                           </span>
+                          {matchedImpact && (
+                            <span
+                              className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-full border uppercase ${getTerminalImpactBadge(
+                                matchedImpact.terminal_impact
+                              )}`}
+                            >
+                              Impact: {matchedImpact.terminal_impact.replace(/_/g, " ")}
+                            </span>
+                          )}
                           <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-muted text-muted-foreground uppercase">
                             {path.status}
                           </span>
@@ -829,6 +1274,21 @@ export default function AttackGraphPage() {
                             {path.steps.length} Steps
                           </span>
                         </div>
+                        {matchedImpact && matchedImpact.boundaries_crossed && matchedImpact.boundaries_crossed.length > 0 && (
+                          <div className="flex items-center gap-1.5 flex-wrap pt-1">
+                            <span className="text-[10px] uppercase font-bold text-muted-foreground">Boundaries:</span>
+                            {matchedImpact.boundaries_crossed.map((b) => (
+                              <span
+                                key={b}
+                                className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border uppercase ${getBoundaryBadge(
+                                  b
+                                )}`}
+                              >
+                                {b}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </div>
 
                       {/* Rebuild Path Button */}
@@ -888,6 +1348,25 @@ export default function AttackGraphPage() {
                                     >
                                       {step.finding_type || "FINDING"}
                                     </span>
+                                    {/* Step Boundary Chip */}
+                                    {(() => {
+                                      const ft = (step.finding_type || "").toUpperCase();
+                                      let boundary = "RESOURCE";
+                                      if (ft.startsWith("AUTH_") || ft.includes("AUTHENTICATION")) boundary = "AUTH";
+                                      else if (ft.includes("BOLA") || ft.includes("BFLA") || ft.includes("AUTHORIZATION")) boundary = "AUTHORIZATION";
+                                      else if (ft.includes("WORKFLOW") || ft.includes("STATE") || ft.includes("STEP")) boundary = "WORKFLOW";
+                                      else if (ft.includes("PROPERTY") || ft.includes("EXPOSURE")) boundary = "PROPERTY";
+
+                                      return (
+                                        <span
+                                          className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border uppercase ${getBoundaryBadge(
+                                            boundary
+                                          )}`}
+                                        >
+                                          {boundary}
+                                        </span>
+                                      );
+                                    })()}
                                     <span className="text-xs font-semibold text-foreground group-hover:text-indigo-300 transition-colors">
                                       {step.finding_title || `Finding #${step.finding_id}`}
                                     </span>
@@ -942,7 +1421,8 @@ export default function AttackGraphPage() {
                       </div>
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

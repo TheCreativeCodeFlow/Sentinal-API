@@ -49,6 +49,7 @@ class Project(Base):
     attack_graphs = relationship("AttackGraph", back_populates="project", cascade="all, delete-orphan")
     correlations = relationship("FindingCorrelation", back_populates="project", cascade="all, delete-orphan")
     attack_paths = relationship("AttackPath", back_populates="project", cascade="all, delete-orphan")
+    security_impacts = relationship("SecurityImpact", back_populates="project", cascade="all, delete-orphan")
 
 
 class API(Base):
@@ -334,6 +335,7 @@ class Finding(Base):
     resource = relationship("Resource", foreign_keys=[resource_id])
     graph_nodes = relationship("AttackGraphNode", back_populates="finding")
     path_steps = relationship("AttackPathStep", foreign_keys="AttackPathStep.finding_id", back_populates="finding")
+    security_impacts = relationship("SecurityImpact", back_populates="finding", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("ix_findings_project_severity", "project_id", "severity"),
@@ -915,6 +917,7 @@ class AttackPath(Base):
         cascade="all, delete-orphan",
         order_by="AttackPathStep.position",
     )
+    security_impacts = relationship("SecurityImpact", back_populates="attack_path", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("ix_attack_paths_project_status", "project_id", "status"),
@@ -944,6 +947,46 @@ class AttackPathStep(Base):
     )
 
 
+# ==============================================================================
+# STAGE 8.3: Deterministic Security Impact Analysis Models
+# ==============================================================================
+
+class SecurityImpact(Base):
+    __tablename__ = "security_impacts"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    attack_path_id = Column(String(36), ForeignKey("attack_paths.id", ondelete="CASCADE"), nullable=True, index=True)
+    finding_id = Column(String(36), ForeignKey("findings.id", ondelete="CASCADE"), nullable=True, index=True)
+    initial_access = Column(Boolean, default=False, nullable=False)
+    authentication_boundary_crossed = Column(Boolean, default=False, nullable=False)
+    authorization_boundary_crossed = Column(Boolean, default=False, nullable=False)
+    identity_boundary_crossed = Column(Boolean, default=False, nullable=False)
+    resource_boundary_crossed = Column(Boolean, default=False, nullable=False)
+    workflow_boundary_crossed = Column(Boolean, default=False, nullable=False)
+    property_boundary_crossed = Column(Boolean, default=False, nullable=False)
+    sensitive_data_reached = Column(Boolean, default=False, nullable=False)
+    cross_identity_impact = Column(Boolean, default=False, nullable=False)
+    cross_resource_impact = Column(Boolean, default=False, nullable=False)
+    terminal_impact = Column(String(50), nullable=False, default="NONE", index=True)  # NONE, RESOURCE_ACCESS, SENSITIVE_PROPERTY_EXPOSURE, CROSS_IDENTITY_ACCESS, PRIVILEGED_WORKFLOW_ACCESS, MULTI_BOUNDARY_ACCESS
+    explanation = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    project = relationship("Project", back_populates="security_impacts")
+    attack_path = relationship("AttackPath", back_populates="security_impacts")
+    finding = relationship("Finding", back_populates="security_impacts")
+
+    __table_args__ = (
+        Index("ix_security_impacts_project", "project_id"),
+        Index("ix_security_impacts_path", "attack_path_id"),
+        Index("ix_security_impacts_finding", "finding_id"),
+        Index("ix_security_impacts_terminal", "terminal_impact"),
+    )
+
+
 # Prevent pytest from treating model classes as test case classes
 AttackGraph.__test__ = False
 AttackGraphNode.__test__ = False
@@ -951,3 +994,4 @@ AttackGraphEdge.__test__ = False
 FindingCorrelation.__test__ = False
 AttackPath.__test__ = False
 AttackPathStep.__test__ = False
+SecurityImpact.__test__ = False

@@ -26,6 +26,7 @@ def db_engine():
         # Drop all tables and indexes completely
         with engine.connect() as conn:
             conn.execute(text("""
+                DROP TABLE IF EXISTS security_impacts CASCADE;
                 DROP TABLE IF EXISTS attack_path_steps CASCADE;
                 DROP TABLE IF EXISTS attack_paths CASCADE;
                 DROP TABLE IF EXISTS attack_graph_edges CASCADE;

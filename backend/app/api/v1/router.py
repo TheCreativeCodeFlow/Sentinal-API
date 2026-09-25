@@ -36,6 +36,7 @@ from app.models import (
     FindingCorrelation,
     AttackPath,
     AttackPathStep,
+    SecurityImpact,
 )
 from app.schemas import (
     ProjectCreate,
@@ -146,10 +147,15 @@ from app.schemas import (
     AttackPathInDB,
     AttackPathDetailInDB,
     AttackPathAnalysisResponse,
+    SecurityImpactBase,
+    SecurityImpactInDB,
+    SecurityImpactDetailInDB,
+    SecurityImpactAnalysisResponse,
 )
 from app.services.security_engine.redactor import SENSITIVE_HEADER_NAMES
 from app.services.security_engine.correlation_engine import CorrelationEngine
 from app.services.security_engine.attack_path_engine import AttackPathEngine
+from app.services.security_engine.impact_engine import ImpactEngine
 
 
 
@@ -4523,6 +4529,162 @@ def rebuild_attack_path(
     return format_attack_path_detail_response(updated_path)
 
 
+# ==============================================================================
+# STAGE 8.3: Deterministic Security Impact Analysis Router & Formatters
+# ==============================================================================
+impact_router = APIRouter(tags=["security-impacts"])
+
+
+def format_security_impact_response(impact: SecurityImpact, db: Session) -> SecurityImpactDetailInDB:
+    path = impact.attack_path or (
+        db.query(AttackPath).filter(AttackPath.id == impact.attack_path_id).first()
+        if impact.attack_path_id
+        else None
+    )
+    finding = impact.finding or (
+        db.query(Finding).filter(Finding.id == impact.finding_id).first()
+        if impact.finding_id
+        else None
+    )
+
+    engine = ImpactEngine(db=db)
+    if path:
+        eval_res = engine.evaluate_path_impact(path)
+    elif finding:
+        eval_res = engine.evaluate_finding_impact(finding)
+    else:
+        eval_res = {
+            "identities_involved": [],
+            "resources_involved": [],
+            "sensitive_properties_reached": [],
+            "boundaries_crossed": [],
+        }
+
+    boundaries = []
+    if impact.authentication_boundary_crossed:
+        boundaries.append("AUTHENTICATION")
+    if impact.authorization_boundary_crossed:
+        boundaries.append("AUTHORIZATION")
+    if impact.identity_boundary_crossed:
+        boundaries.append("IDENTITY")
+    if impact.resource_boundary_crossed:
+        boundaries.append("RESOURCE")
+    if impact.workflow_boundary_crossed:
+        boundaries.append("WORKFLOW")
+    if impact.property_boundary_crossed:
+        boundaries.append("PROPERTY")
+
+    return SecurityImpactDetailInDB(
+        id=impact.id,
+        project_id=impact.project_id,
+        attack_path_id=impact.attack_path_id,
+        finding_id=impact.finding_id,
+        initial_access=impact.initial_access,
+        authentication_boundary_crossed=impact.authentication_boundary_crossed,
+        authorization_boundary_crossed=impact.authorization_boundary_crossed,
+        identity_boundary_crossed=impact.identity_boundary_crossed,
+        resource_boundary_crossed=impact.resource_boundary_crossed,
+        workflow_boundary_crossed=impact.workflow_boundary_crossed,
+        property_boundary_crossed=impact.property_boundary_crossed,
+        sensitive_data_reached=impact.sensitive_data_reached,
+        cross_identity_impact=impact.cross_identity_impact,
+        cross_resource_impact=impact.cross_resource_impact,
+        terminal_impact=impact.terminal_impact,
+        explanation=impact.explanation,
+        created_at=impact.created_at,
+        updated_at=impact.updated_at,
+        attack_path_name=path.name if path else None,
+        finding_title=finding.title if finding else None,
+        finding_type=finding.type if finding else None,
+        identities_involved=eval_res.get("identities_involved", []),
+        resources_involved=eval_res.get("resources_involved", []),
+        sensitive_properties_reached=eval_res.get("sensitive_properties_reached", []),
+        boundaries_crossed=boundaries if boundaries else eval_res.get("boundaries_crossed", []),
+    )
+
+
+@impact_router.post(
+    "/projects/{project_id}/impact-analysis/run",
+    response_model=SecurityImpactAnalysisResponse,
+)
+def run_project_impact_analysis(
+    project_id: int,
+    db: Session = Depends(get_db),
+):
+    """
+    Run deterministic security impact analysis for a project.
+    Completely offline - never executes target APIs.
+    """
+    project = get_project_or_404(project_id, db)
+    engine = ImpactEngine(db=db)
+    result = engine.run_impact_analysis(project_id=project.id)
+    return SecurityImpactAnalysisResponse(
+        project_id=result["project_id"],
+        impacts_count=result["impacts_count"],
+        impacts=[format_security_impact_response(i, db) for i in result["impacts"]],
+    )
+
+
+@impact_router.get(
+    "/projects/{project_id}/security-impacts",
+    response_model=List[SecurityImpactDetailInDB],
+)
+def list_project_security_impacts(
+    project_id: int,
+    db: Session = Depends(get_db),
+):
+    """List all security impacts analyzed for a project."""
+    project = get_project_or_404(project_id, db)
+    impacts = (
+        db.query(SecurityImpact)
+        .filter(SecurityImpact.project_id == project.id)
+        .order_by(SecurityImpact.created_at.desc())
+        .all()
+    )
+    return [format_security_impact_response(i, db) for i in impacts]
+
+
+@impact_router.get(
+    "/security-impacts/{impact_id}",
+    response_model=SecurityImpactDetailInDB,
+)
+def get_security_impact(
+    impact_id: str,
+    db: Session = Depends(get_db),
+):
+    """Get single security impact analysis detail."""
+    impact = db.query(SecurityImpact).filter(SecurityImpact.id == impact_id).first()
+    if not impact:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Security impact {impact_id} not found",
+        )
+    return format_security_impact_response(impact, db)
+
+
+@impact_router.post(
+    "/security-impacts/{impact_id}/rebuild",
+    response_model=SecurityImpactDetailInDB,
+)
+def rebuild_security_impact(
+    impact_id: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Rebuild and re-verify an existing security impact record offline.
+    Never executes target APIs.
+    """
+    impact = db.query(SecurityImpact).filter(SecurityImpact.id == impact_id).first()
+    if not impact:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Security impact {impact_id} not found",
+        )
+    engine = ImpactEngine(db=db)
+    updated = engine.rebuild_security_impact(impact_id=impact.id)
+    return format_security_impact_response(updated, db)
+
+
 # Include sub-routers into main router
 router.include_router(project_router)
 router.include_router(api_router)
@@ -4542,3 +4704,4 @@ router.include_router(auth_security_router)
 router.include_router(workflow_router)
 router.include_router(correlation_router)
 router.include_router(attack_path_router)
+router.include_router(impact_router)

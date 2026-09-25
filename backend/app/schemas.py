@@ -1089,3 +1089,50 @@ class AttackPathAnalysisResponse(BaseModel):
     attack_graph_id: str
     paths_count: int
     paths: List[AttackPathDetailInDB] = []
+
+
+# ==============================================================================
+# STAGE 8.3: Deterministic Security Impact Analysis Schemas
+# ==============================================================================
+
+class SecurityImpactBase(BaseModel):
+    initial_access: bool = False
+    authentication_boundary_crossed: bool = False
+    authorization_boundary_crossed: bool = False
+    identity_boundary_crossed: bool = False
+    resource_boundary_crossed: bool = False
+    workflow_boundary_crossed: bool = False
+    property_boundary_crossed: bool = False
+    sensitive_data_reached: bool = False
+    cross_identity_impact: bool = False
+    cross_resource_impact: bool = False
+    terminal_impact: str = "NONE"
+    explanation: str
+
+
+class SecurityImpactInDB(SecurityImpactBase):
+    id: str
+    project_id: int
+    attack_path_id: Optional[str] = None
+    finding_id: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    attack_path_name: Optional[str] = None
+    finding_title: Optional[str] = None
+    finding_type: Optional[str] = None
+    identities_involved: List[str] = []
+    resources_involved: List[str] = []
+    sensitive_properties_reached: List[str] = []
+    boundaries_crossed: List[str] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SecurityImpactDetailInDB(SecurityImpactInDB):
+    pass
+
+
+class SecurityImpactAnalysisResponse(BaseModel):
+    project_id: int
+    impacts_count: int
+    impacts: List[SecurityImpactDetailInDB] = []
