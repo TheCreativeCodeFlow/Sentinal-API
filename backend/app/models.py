@@ -51,6 +51,7 @@ class Project(Base):
     attack_paths = relationship("AttackPath", back_populates="project", cascade="all, delete-orphan")
     security_impacts = relationship("SecurityImpact", back_populates="project", cascade="all, delete-orphan")
     ai_analyses = relationship("AIAnalysis", back_populates="project", cascade="all, delete-orphan")
+    ai_hypotheses = relationship("AIHypothesis", back_populates="project", cascade="all, delete-orphan")
 
 
 class API(Base):
@@ -338,6 +339,7 @@ class Finding(Base):
     path_steps = relationship("AttackPathStep", foreign_keys="AttackPathStep.finding_id", back_populates="finding")
     security_impacts = relationship("SecurityImpact", back_populates="finding", cascade="all, delete-orphan")
     ai_analyses = relationship("AIAnalysis", back_populates="finding", cascade="all, delete-orphan")
+    ai_hypotheses = relationship("AIHypothesis", back_populates="finding")
 
     __table_args__ = (
         Index("ix_findings_project_severity", "project_id", "severity"),
@@ -921,6 +923,7 @@ class AttackPath(Base):
     )
     security_impacts = relationship("SecurityImpact", back_populates="attack_path", cascade="all, delete-orphan")
     ai_analyses = relationship("AIAnalysis", back_populates="attack_path", cascade="all, delete-orphan")
+    ai_hypotheses = relationship("AIHypothesis", back_populates="attack_path")
 
     __table_args__ = (
         Index("ix_attack_paths_project_status", "project_id", "status"),
@@ -1014,10 +1017,70 @@ class AIAnalysis(Base):
     project = relationship("Project", back_populates="ai_analyses")
     attack_path = relationship("AttackPath", back_populates="ai_analyses")
     finding = relationship("Finding", back_populates="ai_analyses")
+    hypotheses = relationship("AIHypothesis", back_populates="ai_analysis", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("ix_ai_analyses_project_status", "project_id", "status"),
         Index("ix_ai_analyses_project_type", "project_id", "analysis_type"),
+    )
+
+
+# ==============================================================================
+# STAGE 9.2: Human-Approved AI Security Testing Models
+# ==============================================================================
+
+class AIHypothesis(Base):
+    __tablename__ = "ai_hypotheses"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    ai_analysis_id = Column(String(36), ForeignKey("ai_analyses.id", ondelete="CASCADE"), nullable=False, index=True)
+    attack_path_id = Column(String(36), ForeignKey("attack_paths.id", ondelete="SET NULL"), nullable=True, index=True)
+    finding_id = Column(String(36), ForeignKey("findings.id", ondelete="SET NULL"), nullable=True, index=True)
+    security_test_id = Column(String(36), ForeignKey("security_tests.id", ondelete="SET NULL"), nullable=True, index=True)
+    hypothesis = Column(Text, nullable=False)
+    reason = Column(Text, nullable=False)
+    suggested_test_type = Column(String(50), nullable=False)
+    required_context = Column(JSON, nullable=True)
+    confidence = Column(String(20), nullable=False, default="MEDIUM")  # LOW, MEDIUM, HIGH
+    requires_human_review = Column(Boolean, nullable=False, default=True)
+    status = Column(String(50), nullable=False, default="PENDING_REVIEW", index=True)  # PENDING_REVIEW, APPROVED, REJECTED, CONVERTED, EXPIRED
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
+    reviewed_by = Column(String(255), nullable=True)
+    rejection_reason = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    project = relationship("Project", back_populates="ai_hypotheses")
+    ai_analysis = relationship("AIAnalysis", back_populates="hypotheses")
+    attack_path = relationship("AttackPath", back_populates="ai_hypotheses")
+    finding = relationship("Finding", back_populates="ai_hypotheses")
+    security_test = relationship("SecurityTest")
+    reviews = relationship("AIHypothesisReview", back_populates="hypothesis", cascade="all, delete-orphan", order_by="AIHypothesisReview.created_at.desc()")
+
+    __table_args__ = (
+        Index("ix_ai_hypotheses_project_status", "project_id", "status"),
+        Index("ix_ai_hypotheses_analysis", "ai_analysis_id"),
+        Index("ix_ai_hypotheses_path", "attack_path_id"),
+    )
+
+
+class AIHypothesisReview(Base):
+    __tablename__ = "ai_hypothesis_reviews"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    hypothesis_id = Column(String(36), ForeignKey("ai_hypotheses.id", ondelete="CASCADE"), nullable=False, index=True)
+    action = Column(String(50), nullable=False)  # APPROVE, REJECT
+    reviewer_reference = Column(String(255), nullable=False)
+    reason = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    hypothesis = relationship("AIHypothesis", back_populates="reviews")
+
+    __table_args__ = (
+        Index("ix_ai_hypothesis_reviews_hypo", "hypothesis_id"),
     )
 
 
@@ -1030,3 +1093,5 @@ AttackPath.__test__ = False
 AttackPathStep.__test__ = False
 SecurityImpact.__test__ = False
 AIAnalysis.__test__ = False
+AIHypothesis.__test__ = False
+AIHypothesisReview.__test__ = False

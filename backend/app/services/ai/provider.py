@@ -24,6 +24,7 @@ from app.models import (
     AttackPath,
     SecurityImpact,
     AIAnalysis,
+    AIHypothesis,
 )
 from app.schemas import AIAnalysisType
 from app.services.ai.security_context import SecurityContextBuilder
@@ -250,15 +251,15 @@ class MockAIProvider(AIProvider):
                     "required_existing_context": [
                         s.get("finding", {}).get("title", "Confirmed finding") for s in ordered_steps[:2]
                     ] or ["Confirmed BOLA finding"],
-                    "suggested_test_type": "AUTHORIZATION_GET_MUTATION_VERIFICATION",
+                    "suggested_test_type": "BOLA",
                     "confidence": "HIGH",
                     "requires_human_review": True,
                 },
                 {
-                    "hypothesis": "Enumeration of sequential or predictable IDs might allow full catalog exfiltration.",
-                    "reason": "Direct object references without authorization often allow algorithmic ID scraping.",
-                    "required_existing_context": ["Observed numeric or predictable identifiers in endpoint path"],
-                    "suggested_test_type": "SEQUENTIAL_ID_INSPECTION",
+                    "hypothesis": "Secondary property disclosure may expose sensitive attributes on related accounts.",
+                    "reason": "When primary endpoints lack proper object isolation, associated property endpoints often expose internal fields.",
+                    "required_existing_context": ["Observed sensitive properties or account metadata in endpoint path"],
+                    "suggested_test_type": "PROPERTY_EXPOSURE",
                     "confidence": "MEDIUM",
                     "requires_human_review": True,
                 },
@@ -515,13 +516,43 @@ class AISecurityService:
             raise ValueError(f"Attack path {attack_path_id} not found.")
 
         input_context = self.context_builder.build_attack_path_context(path)
-        return self._execute_analysis(
+        analysis = self._execute_analysis(
             project_id=path.project_id,
             analysis_type=AIAnalysisType.ATTACK_HYPOTHESIS.value,
             input_context=input_context,
             finding_id=None,
             attack_path_id=path.id,
         )
+
+        # Stage 9.2: Persist AIHypothesis records in PENDING_REVIEW
+        if analysis.status == "COMPLETED" and analysis.output and "hypotheses" in analysis.output:
+            finding_id = path.steps[0].finding_id if path.steps else None
+            valid_types = {"BOLA", "BFLA", "PROPERTY_EXPOSURE", "AUTH_MISSING", "AUTH_INVALID", "AUTH_MALFORMED", "AUTH_EXPIRED", "AUTH_SCHEME", "WORKFLOW"}
+            for h in analysis.output.get("hypotheses", []):
+                test_type = h.get("suggested_test_type", "BOLA")
+                if test_type not in valid_types:
+                    test_type = "BOLA"
+
+                hypo_obj = AIHypothesis(
+                    project_id=path.project_id,
+                    ai_analysis_id=analysis.id,
+                    attack_path_id=path.id,
+                    finding_id=finding_id,
+                    hypothesis=h.get("hypothesis", ""),
+                    reason=h.get("reason", ""),
+                    suggested_test_type=test_type,
+                    required_context={
+                        "context_items": h.get("required_existing_context", []),
+                        "suggested_test_type_raw": h.get("suggested_test_type"),
+                    },
+                    confidence=h.get("confidence", "MEDIUM"),
+                    requires_human_review=True,
+                    status="PENDING_REVIEW",
+                )
+                self.db.add(hypo_obj)
+            self.db.commit()
+
+        return analysis
 
     def generate_recommendations(
         self,

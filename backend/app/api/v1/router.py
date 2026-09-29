@@ -38,6 +38,8 @@ from app.models import (
     AttackPathStep,
     SecurityImpact,
     AIAnalysis,
+    AIHypothesis,
+    AIHypothesisReview,
 )
 from app.schemas import (
     ProjectCreate,
@@ -159,12 +161,29 @@ from app.schemas import (
     AIAnalysisResponse,
     AIAnalysesListResponse,
     AIAnalyzeRequest,
+    AIHypothesisStatus,
+    AIHypothesisBase,
+    AIHypothesisInDB,
+    AIHypothesisDetailInDB,
+    AIHypothesisReviewInDB,
+    AIHypothesisApprovalRequest,
+    AIHypothesisRejectionRequest,
+    AIHypothesisConvertRequest,
+    AIHypothesisConvertResponse,
+    AIHypothesisListResponse,
+    AIHypothesisAuditResponse,
 )
 from app.services.security_engine.redactor import SENSITIVE_HEADER_NAMES
 from app.services.security_engine.correlation_engine import CorrelationEngine
 from app.services.security_engine.attack_path_engine import AttackPathEngine
 from app.services.security_engine.impact_engine import ImpactEngine
-from app.services.ai import AISecurityService
+from app.services.ai import (
+    AISecurityService,
+    HypothesisReviewService,
+    HypothesisReviewError,
+    HypothesisConverter,
+    HypothesisConversionError,
+)
 
 
 
@@ -4965,6 +4984,298 @@ def get_ai_analysis(
             detail=f"AI analysis {analysis_id} not found",
         )
     return AIAnalysisResponse(analysis=format_ai_analysis_response(analysis, db))
+
+
+# ==============================================================================
+# STAGE 9.2: Human-Approved AI Security Testing Endpoints
+# ==============================================================================
+
+def format_ai_hypothesis_response(hypo: AIHypothesis, db: Session) -> AIHypothesisDetailInDB:
+    finding = db.query(Finding).filter(Finding.id == hypo.finding_id).first() if hypo.finding_id else None
+    path = db.query(AttackPath).filter(AttackPath.id == hypo.attack_path_id).first() if hypo.attack_path_id else None
+    latest_review = hypo.reviews[0].action if hypo.reviews else None
+
+    return AIHypothesisDetailInDB(
+        id=hypo.id,
+        project_id=hypo.project_id,
+        ai_analysis_id=hypo.ai_analysis_id,
+        attack_path_id=hypo.attack_path_id,
+        finding_id=hypo.finding_id,
+        security_test_id=hypo.security_test_id,
+        hypothesis=hypo.hypothesis,
+        reason=hypo.reason,
+        suggested_test_type=hypo.suggested_test_type,
+        required_context=hypo.required_context,
+        confidence=hypo.confidence,
+        requires_human_review=hypo.requires_human_review,
+        status=hypo.status,
+        reviewed_at=hypo.reviewed_at,
+        reviewed_by=hypo.reviewed_by,
+        rejection_reason=hypo.rejection_reason,
+        created_at=hypo.created_at,
+        updated_at=hypo.updated_at,
+        finding_title=finding.title if finding else None,
+        attack_path_name=path.name if path else None,
+        latest_review_action=latest_review,
+    )
+
+
+@ai_router.get(
+    "/projects/{project_id}/ai/hypotheses",
+    response_model=AIHypothesisListResponse,
+)
+def list_project_ai_hypotheses(
+    project_id: int,
+    status: Optional[str] = None,
+    confidence: Optional[str] = None,
+    attack_path_id: Optional[str] = None,
+    finding_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """List all AI hypotheses generated for a project with optional filters."""
+    project = get_project_or_404(project_id, db)
+    query = db.query(AIHypothesis).filter(AIHypothesis.project_id == project.id)
+
+    if status:
+        query = query.filter(AIHypothesis.status == status)
+    if confidence:
+        query = query.filter(AIHypothesis.confidence == confidence)
+    if attack_path_id:
+        query = query.filter(AIHypothesis.attack_path_id == attack_path_id)
+    if finding_id:
+        query = query.filter(AIHypothesis.finding_id == finding_id)
+
+    hypotheses = query.order_by(AIHypothesis.created_at.desc()).all()
+    formatted = [format_ai_hypothesis_response(h, db) for h in hypotheses]
+
+    return AIHypothesisListResponse(
+        project_id=project.id,
+        count=len(formatted),
+        hypotheses=formatted,
+    )
+
+
+@ai_router.get(
+    "/ai/hypotheses/{hypothesis_id}",
+    response_model=AIHypothesisDetailInDB,
+)
+def get_ai_hypothesis(
+    hypothesis_id: str,
+    db: Session = Depends(get_db),
+):
+    """Get single AI hypothesis by ID."""
+    hypo = db.query(AIHypothesis).filter(AIHypothesis.id == hypothesis_id).first()
+    if not hypo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"AI hypothesis '{hypothesis_id}' not found",
+        )
+    return format_ai_hypothesis_response(hypo, db)
+
+
+@ai_router.post(
+    "/ai/hypotheses/{hypothesis_id}/approve",
+    response_model=AIHypothesisDetailInDB,
+)
+def approve_ai_hypothesis(
+    hypothesis_id: str,
+    req: AIHypothesisApprovalRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Approve an AI security test hypothesis.
+    IMPORTANT: Strictly non-executable. Does NOT execute target API requests.
+    Creates an immutable audit record and transitions hypothesis status to APPROVED.
+    """
+    service = HypothesisReviewService(db=db)
+    try:
+        hypo, _ = service.approve_hypothesis(
+            hypothesis_id=hypothesis_id,
+            reviewer_reference=req.reviewer_reference,
+            reason=req.reason,
+        )
+    except HypothesisReviewError as hre:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(hre),
+        )
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(ve),
+        )
+
+    return format_ai_hypothesis_response(hypo, db)
+
+
+@ai_router.post(
+    "/ai/hypotheses/{hypothesis_id}/reject",
+    response_model=AIHypothesisDetailInDB,
+)
+def reject_ai_hypothesis(
+    hypothesis_id: str,
+    req: AIHypothesisRejectionRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Reject an AI security test hypothesis with a documented reason.
+    Creates an immutable audit record and transitions hypothesis status to REJECTED.
+    """
+    service = HypothesisReviewService(db=db)
+    try:
+        hypo, _ = service.reject_hypothesis(
+            hypothesis_id=hypothesis_id,
+            reviewer_reference=req.reviewer_reference,
+            reason=req.reason,
+        )
+    except HypothesisReviewError as hre:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(hre),
+        )
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(ve),
+        )
+
+    return format_ai_hypothesis_response(hypo, db)
+
+
+@ai_router.post(
+    "/ai/hypotheses/{hypothesis_id}/convert",
+    response_model=AIHypothesisConvertResponse,
+)
+def convert_ai_hypothesis_to_security_test(
+    hypothesis_id: str,
+    req: Optional[AIHypothesisConvertRequest] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Convert an APPROVED hypothesis into a deterministic SecurityTest configuration.
+    IMPORTANT: Strictly non-executable. Does NOT execute target API requests.
+    The resulting SecurityTest must be executed separately via the existing security testing engine.
+    """
+    converter = HypothesisConverter(db=db)
+    try:
+        hypo, security_test = converter.convert_hypothesis(
+            hypothesis_id=hypothesis_id,
+            reviewer_reference=req.reviewer_reference if req else None,
+        )
+    except HypothesisConversionError as hce:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(hce),
+        )
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(ve),
+        )
+
+    return AIHypothesisConvertResponse(
+        hypothesis=format_ai_hypothesis_response(hypo, db),
+        security_test_id=security_test.id,
+        message=f"Successfully converted hypothesis to deterministic {security_test.test_type} SecurityTest configuration.",
+    )
+
+
+@ai_router.get(
+    "/ai/hypotheses/{hypothesis_id}/audit",
+    response_model=AIHypothesisAuditResponse,
+)
+def get_ai_hypothesis_audit(
+    hypothesis_id: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Get full immutable audit log and lifecycle trace for an AI hypothesis.
+    Traces AI creation, human review/approval, conversion, and deterministic engine execution.
+    """
+    hypo = db.query(AIHypothesis).filter(AIHypothesis.id == hypothesis_id).first()
+    if not hypo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"AI hypothesis '{hypothesis_id}' not found",
+        )
+
+    # Reviews
+    reviews_in_db = [
+        AIHypothesisReviewInDB.model_validate(r) for r in hypo.reviews
+    ]
+
+    # SecurityTest details (if converted)
+    sec_test_data = None
+    if hypo.security_test_id and hypo.security_test:
+        st = hypo.security_test
+        sec_test_data = {
+            "id": st.id,
+            "test_type": st.test_type,
+            "status": st.status,
+            "endpoint_id": st.endpoint_id,
+            "endpoint_path": st.endpoint.path if st.endpoint else None,
+            "endpoint_method": st.endpoint.method if st.endpoint else None,
+            "attacker_identity_name": st.attacker_identity.name if st.attacker_identity else None,
+            "execution_count": len(st.executions),
+            "latest_execution_result": st.executions[-1].result if st.executions else None,
+        }
+
+    # Trace Lifecycle Stages
+    lifecycle = [
+        {
+            "stage": "HYPOTHESIS_CREATED",
+            "actor": f"AI Reasoner ({hypo.ai_analysis.model_provider} / {hypo.ai_analysis.model_name})" if hypo.ai_analysis else "AI Reasoner",
+            "category": "AI ACTION",
+            "timestamp": hypo.created_at.isoformat() if hypo.created_at else None,
+            "status": "COMPLETED",
+            "detail": hypo.hypothesis,
+        }
+    ]
+
+    # Reviews in chronological order
+    sorted_reviews = sorted(hypo.reviews, key=lambda r: r.created_at)
+    for r in sorted_reviews:
+        lifecycle.append({
+            "stage": f"HUMAN_{r.action}",
+            "actor": r.reviewer_reference,
+            "category": "HUMAN ACTION",
+            "timestamp": r.created_at.isoformat() if r.created_at else None,
+            "status": "COMPLETED",
+            "reason": r.reason,
+            "detail": f"Human reviewer marked hypothesis as {r.action}",
+        })
+
+    if hypo.status == "CONVERTED" and hypo.security_test_id:
+        lifecycle.append({
+            "stage": "CONVERTED_TO_SECURITY_TEST",
+            "actor": hypo.reviewed_by or "Human Reviewer",
+            "category": "HUMAN ACTION",
+            "timestamp": hypo.updated_at.isoformat() if hypo.updated_at else None,
+            "status": "COMPLETED",
+            "security_test_id": hypo.security_test_id,
+            "detail": f"Converted into deterministic {hypo.suggested_test_type} SecurityTest without executing target traffic.",
+        })
+
+        # Check if executed separately by Deterministic Security Engine
+        if hypo.security_test and hypo.security_test.executions:
+            for exec_item in hypo.security_test.executions:
+                lifecycle.append({
+                    "stage": "DETERMINISTIC_ENGINE_EXECUTION",
+                    "actor": "Deterministic Security Engine",
+                    "category": "DETERMINISTIC ENGINE ACTION",
+                    "timestamp": exec_item.created_at.isoformat() if exec_item.created_at else None,
+                    "status": exec_item.status,
+                    "execution_id": exec_item.id,
+                    "result": exec_item.result,
+                    "detail": f"Executed via SecurityTest engine: Result {exec_item.result}",
+                })
+
+    return AIHypothesisAuditResponse(
+        hypothesis=format_ai_hypothesis_response(hypo, db),
+        reviews=reviews_in_db,
+        security_test=sec_test_data,
+        lifecycle_stages=lifecycle,
+    )
 
 
 # Include sub-routers into main router

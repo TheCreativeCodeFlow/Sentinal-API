@@ -1251,3 +1251,103 @@ class AIAnalysesListResponse(BaseModel):
 
 class AIAnalyzeRequest(BaseModel):
     analysis_type: Optional[str] = None
+
+
+# ==============================================================================
+# STAGE 9.2: Human-Approved AI Security Testing Schemas
+# ==============================================================================
+
+class AIHypothesisStatus(str, Enum):
+    PENDING_REVIEW = "PENDING_REVIEW"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    CONVERTED = "CONVERTED"
+    EXPIRED = "EXPIRED"
+
+
+class AIHypothesisReviewAction(str, Enum):
+    APPROVE = "APPROVE"
+    REJECT = "REJECT"
+
+
+class AIHypothesisBase(BaseModel):
+    hypothesis: str = Field(..., min_length=1, max_length=5000)
+    reason: str = Field(..., min_length=1, max_length=5000)
+    suggested_test_type: str = Field(..., min_length=1, max_length=50)
+    required_context: Optional[Dict[str, Any]] = None
+    confidence: str = Field("MEDIUM", pattern="^(LOW|MEDIUM|HIGH)$")
+    requires_human_review: bool = True
+
+
+class AIHypothesisCreate(AIHypothesisBase):
+    project_id: int
+    ai_analysis_id: str
+    attack_path_id: Optional[str] = None
+    finding_id: Optional[str] = None
+
+
+class AIHypothesisInDB(AIHypothesisBase):
+    id: str
+    project_id: int
+    ai_analysis_id: str
+    attack_path_id: Optional[str] = None
+    finding_id: Optional[str] = None
+    security_test_id: Optional[str] = None
+    status: str = "PENDING_REVIEW"
+    reviewed_at: Optional[datetime] = None
+    reviewed_by: Optional[str] = None
+    rejection_reason: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AIHypothesisDetailInDB(AIHypothesisInDB):
+    finding_title: Optional[str] = None
+    attack_path_name: Optional[str] = None
+    latest_review_action: Optional[str] = None
+
+
+class AIHypothesisReviewInDB(BaseModel):
+    id: str
+    hypothesis_id: str
+    action: str
+    reviewer_reference: str
+    reason: Optional[str] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AIHypothesisApprovalRequest(BaseModel):
+    reviewer_reference: str = Field(..., min_length=1, max_length=255)
+    reason: Optional[str] = Field(None, max_length=2000)
+
+
+class AIHypothesisRejectionRequest(BaseModel):
+    reviewer_reference: str = Field(..., min_length=1, max_length=255)
+    reason: str = Field(..., min_length=1, max_length=2000)
+
+
+class AIHypothesisConvertRequest(BaseModel):
+    reviewer_reference: Optional[str] = Field(None, max_length=255)
+
+
+class AIHypothesisConvertResponse(BaseModel):
+    hypothesis: AIHypothesisDetailInDB
+    security_test_id: str
+    message: str
+
+
+class AIHypothesisListResponse(BaseModel):
+    project_id: int
+    count: int
+    hypotheses: List[AIHypothesisDetailInDB] = []
+
+
+class AIHypothesisAuditResponse(BaseModel):
+    hypothesis: AIHypothesisDetailInDB
+    reviews: List[AIHypothesisReviewInDB] = []
+    security_test: Optional[Dict[str, Any]] = None
+    lifecycle_stages: List[Dict[str, Any]] = []

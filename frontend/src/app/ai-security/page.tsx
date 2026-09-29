@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useState, useMemo } from "react";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 
@@ -76,6 +77,67 @@ interface AIAnalysisDetail {
   attack_path_name?: string | null;
 }
 
+interface AIHypothesisDetail {
+  id: string;
+  project_id: number;
+  ai_analysis_id: string;
+  attack_path_id?: string | null;
+  finding_id?: string | null;
+  security_test_id?: string | null;
+  hypothesis: string;
+  reason: string;
+  suggested_test_type: string;
+  required_context: Record<string, unknown>;
+  confidence: "LOW" | "MEDIUM" | "HIGH";
+  requires_human_review: boolean;
+  status: "PENDING_REVIEW" | "APPROVED" | "REJECTED" | "CONVERTED" | "EXPIRED";
+  reviewed_at?: string | null;
+  reviewed_by?: string | null;
+  rejection_reason?: string | null;
+  created_at: string;
+  updated_at: string;
+  finding_title?: string | null;
+  attack_path_name?: string | null;
+  latest_review_action?: string | null;
+}
+
+interface AIHypothesisReviewItem {
+  id: string;
+  hypothesis_id: string;
+  action: string;
+  reviewer_reference: string;
+  reason?: string | null;
+  created_at: string;
+}
+
+interface AIHypothesisAuditResponse {
+  hypothesis: AIHypothesisDetail;
+  reviews: AIHypothesisReviewItem[];
+  security_test?: {
+    id: string;
+    test_type: string;
+    status: string;
+    endpoint_id?: number | null;
+    endpoint_path?: string | null;
+    endpoint_method?: string | null;
+    attacker_identity_name?: string | null;
+    execution_count: number;
+    latest_execution_result?: string | null;
+  } | null;
+  lifecycle_stages: Array<{
+    stage: string;
+    actor: string;
+    category: "AI ACTION" | "HUMAN ACTION" | "DETERMINISTIC ENGINE ACTION" | string;
+    timestamp?: string | null;
+    status: string;
+    reason?: string | null;
+    detail?: string | null;
+    security_test_id?: string | null;
+    execution_id?: string | null;
+    result?: string | null;
+  }>;
+}
+
 export default function AISecurityPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null);
@@ -84,6 +146,7 @@ export default function AISecurityPage() {
   const [attackPaths, setAttackPaths] = useState<AttackPathItem[]>([]);
   const [impacts, setImpacts] = useState<SecurityImpactItem[]>([]);
   const [analyses, setAnalyses] = useState<AIAnalysisDetail[]>([]);
+  const [hypotheses, setHypotheses] = useState<AIHypothesisDetail[]>([]);
 
   const [loading, setLoading] = useState(true);
   const [actionInProgress, setActionInProgress] = useState<string | null>(null);
@@ -100,6 +163,20 @@ export default function AISecurityPage() {
 
   // Recommendation Target Type
   const [recTargetType, setRecTargetType] = useState<"FINDING" | "ATTACK_PATH">("FINDING");
+
+  // Hypothesis review & convert modal states
+  const [hypothesisStatusFilter, setHypothesisStatusFilter] = useState<string>("ALL");
+  const [approvingHypo, setApprovingHypo] = useState<AIHypothesisDetail | null>(null);
+  const [approvalReviewer, setApprovalReviewer] = useState<string>("security_reviewer");
+  const [approvalNotes, setApprovalNotes] = useState<string>("");
+
+  const [rejectingHypo, setRejectingHypo] = useState<AIHypothesisDetail | null>(null);
+  const [rejectionReviewer, setRejectionReviewer] = useState<string>("security_reviewer");
+  const [rejectionReason, setRejectionReason] = useState<string>("");
+
+  const [auditHypothesisId, setAuditHypothesisId] = useState<string | null>(null);
+  const [auditData, setAuditData] = useState<AIHypothesisAuditResponse | null>(null);
+  const [loadingAudit, setLoadingAudit] = useState<boolean>(false);
 
   // Load Projects on Mount
   useEffect(() => {
@@ -124,11 +201,12 @@ export default function AISecurityPage() {
   // Reload helper
   const reloadAnalysesAndData = async (projectId: number) => {
     try {
-      const [findingsRes, pathsRes, impactsRes, analysesRes] = await Promise.all([
+      const [findingsRes, pathsRes, impactsRes, analysesRes, hypothesesRes] = await Promise.all([
         fetch(`/api/v1/projects/${projectId}/findings`, { credentials: "include" }),
         fetch(`/api/v1/projects/${projectId}/attack-paths`, { credentials: "include" }),
         fetch(`/api/v1/projects/${projectId}/security-impacts`, { credentials: "include" }),
         fetch(`/api/v1/projects/${projectId}/ai/analyses`, { credentials: "include" }),
+        fetch(`/api/v1/projects/${projectId}/ai/hypotheses`, { credentials: "include" }),
       ]);
 
       if (findingsRes.ok) {
@@ -147,6 +225,10 @@ export default function AISecurityPage() {
         const aData = await analysesRes.json();
         setAnalyses(aData.analyses || []);
       }
+      if (hypothesesRes.ok) {
+        const hData = await hypothesesRes.json();
+        setHypotheses(hData.hypotheses || []);
+      }
     } catch {
       // Ignore background reload failure
     }
@@ -161,11 +243,12 @@ export default function AISecurityPage() {
       try {
         setErrorMsg(null);
 
-        const [findingsRes, pathsRes, impactsRes, analysesRes] = await Promise.all([
+        const [findingsRes, pathsRes, impactsRes, analysesRes, hypothesesRes] = await Promise.all([
           fetch(`/api/v1/projects/${selectedProjectId}/findings`, { credentials: "include" }),
           fetch(`/api/v1/projects/${selectedProjectId}/attack-paths`, { credentials: "include" }),
           fetch(`/api/v1/projects/${selectedProjectId}/security-impacts`, { credentials: "include" }),
           fetch(`/api/v1/projects/${selectedProjectId}/ai/analyses`, { credentials: "include" }),
+          fetch(`/api/v1/projects/${selectedProjectId}/ai/hypotheses`, { credentials: "include" }),
         ]);
 
         if (ignore) return;
@@ -185,6 +268,10 @@ export default function AISecurityPage() {
         if (analysesRes.ok) {
           const aData = await analysesRes.json();
           setAnalyses(aData.analyses || []);
+        }
+        if (hypothesesRes.ok) {
+          const hData = await hypothesesRes.json();
+          setHypotheses(hData.hypotheses || []);
         }
       } catch (err: unknown) {
         if (!ignore) {
@@ -341,6 +428,126 @@ export default function AISecurityPage() {
     }
   };
 
+  // Human Approval Handler
+  const handleApproveHypothesis = async (hypothesisId: string) => {
+    setActionInProgress(`approve-${hypothesisId}`);
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    try {
+      const res = await fetch(`/api/v1/ai/hypotheses/${hypothesisId}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          reviewer_reference: approvalReviewer.trim() || "security_reviewer",
+          reason: approvalNotes.trim() || null,
+        }),
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const errJson = await res.json();
+        throw new Error(errJson.detail || "Failed to approve hypothesis");
+      }
+      setSuccessMsg("Hypothesis approved. It is now eligible for deterministic security test conversion.");
+      setApprovingHypo(null);
+      setApprovalNotes("");
+      if (selectedProjectId) {
+        await reloadAnalysesAndData(selectedProjectId);
+      }
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : "Error approving hypothesis");
+    } finally {
+      setActionInProgress(null);
+    }
+  };
+
+  // Rejection Handler
+  const handleRejectHypothesis = async (hypothesisId: string) => {
+    if (!rejectionReason.trim()) {
+      setErrorMsg("A rejection reason is mandatory.");
+      return;
+    }
+    setActionInProgress(`reject-${hypothesisId}`);
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    try {
+      const res = await fetch(`/api/v1/ai/hypotheses/${hypothesisId}/reject`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          reviewer_reference: rejectionReviewer.trim() || "security_reviewer",
+          reason: rejectionReason.trim(),
+        }),
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const errJson = await res.json();
+        throw new Error(errJson.detail || "Failed to reject hypothesis");
+      }
+      setSuccessMsg("Hypothesis rejected with documented rationale.");
+      setRejectingHypo(null);
+      setRejectionReason("");
+      if (selectedProjectId) {
+        await reloadAnalysesAndData(selectedProjectId);
+      }
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : "Error rejecting hypothesis");
+    } finally {
+      setActionInProgress(null);
+    }
+  };
+
+  // Convert to SecurityTest Configuration Handler
+  const handleConvertHypothesis = async (hypothesisId: string) => {
+    setActionInProgress(`convert-${hypothesisId}`);
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    try {
+      const res = await fetch(`/api/v1/ai/hypotheses/${hypothesisId}/convert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          reviewer_reference: "security_reviewer",
+        }),
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const errJson = await res.json();
+        throw new Error(errJson.detail || "Failed to convert hypothesis");
+      }
+      const data = await res.json();
+      setSuccessMsg(data.message || `Converted hypothesis into deterministic SecurityTest (ID: ${data.security_test_id}).`);
+      if (selectedProjectId) {
+        await reloadAnalysesAndData(selectedProjectId);
+      }
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : "Error converting hypothesis");
+    } finally {
+      setActionInProgress(null);
+    }
+  };
+
+  // Lifecycle Audit Trace Loader
+  const handleOpenAudit = async (hypothesisId: string) => {
+    setAuditHypothesisId(hypothesisId);
+    setAuditData(null);
+    setLoadingAudit(true);
+    try {
+      const res = await fetch(`/api/v1/ai/hypotheses/${hypothesisId}/audit`, {
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const errJson = await res.json();
+        throw new Error(errJson.detail || "Failed to fetch audit log");
+      }
+      const data: AIHypothesisAuditResponse = await res.json();
+      setAuditData(data);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : "Error fetching hypothesis audit trail");
+    } finally {
+      setLoadingAudit(false);
+    }
+  };
+
   // Lookup latest analysis for currently selected item
   const latestFindingAnalysis = useMemo(() => {
     if (!selectedFindingId) return null;
@@ -352,10 +559,11 @@ export default function AISecurityPage() {
     return analyses.find((a) => a.attack_path_id === selectedPathId && a.analysis_type === "ATTACK_PATH_EXPLANATION" && a.status === "COMPLETED") || null;
   }, [selectedPathId, analyses]);
 
-  const latestHypothesesAnalysis = useMemo(() => {
-    if (!selectedPathId) return null;
-    return analyses.find((a) => a.attack_path_id === selectedPathId && a.analysis_type === "ATTACK_HYPOTHESIS" && a.status === "COMPLETED") || null;
-  }, [selectedPathId, analyses]);
+  // Filtered hypotheses
+  const filteredHypotheses = useMemo(() => {
+    if (hypothesisStatusFilter === "ALL") return hypotheses;
+    return hypotheses.filter((h) => h.status === hypothesisStatusFilter);
+  }, [hypotheses, hypothesisStatusFilter]);
 
   return (
     <div className="space-y-6">
@@ -365,11 +573,11 @@ export default function AISecurityPage() {
           <div className="flex items-center gap-3">
             <h1 className="text-2xl font-bold tracking-tight">AI Security Reasoning</h1>
             <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-primary/10 text-primary border border-primary/20">
-              Stage 9.1
+              Stage 9.1 & 9.2
             </span>
           </div>
           <p className="text-sm text-muted-foreground mt-1">
-            Deterministic security graph reasoning, verified fact grounding, root cause analysis, and attack narrative synthesis.
+            Deterministic security graph reasoning, verified fact grounding, root cause analysis, and human-approved hypothesis verification.
           </p>
         </div>
 
@@ -408,7 +616,7 @@ export default function AISecurityPage() {
           </span>
         </div>
         <p className="text-xs text-muted-foreground leading-relaxed">
-          <strong className="text-foreground">Critical Architectural Boundary:</strong> AI is an analytical assistant only. The deterministic security engine remains the authoritative source of truth. AI never executes target traffic, modifies findings, or overrides deterministic security conclusions.
+          <strong className="text-foreground">Critical Architectural Boundary:</strong> AI is an analytical assistant only. The deterministic security engine remains the authoritative source of truth. AI never executes target traffic, modifies findings, or overrides deterministic security conclusions. Hypotheses can only be converted into test configurations via explicit human approval.
         </p>
       </div>
 
@@ -446,7 +654,7 @@ export default function AISecurityPage() {
 
         <div className="flex items-center gap-4 text-xs">
           <div className="flex items-center gap-1.5">
-            <span className="text-muted-foreground">Confirmed Findings:</span>
+            <span className="text-muted-foreground">Findings:</span>
             <span className="font-bold text-foreground">{findings.length}</span>
           </div>
           <div className="flex items-center gap-1.5">
@@ -454,11 +662,21 @@ export default function AISecurityPage() {
             <span className="font-bold text-foreground">{attackPaths.length}</span>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="text-muted-foreground">Impact Profiles:</span>
+            <span className="text-muted-foreground">Impacts:</span>
             <span className="font-bold text-foreground">{impacts.length}</span>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="text-muted-foreground">AI Analyses:</span>
+            <span className="text-muted-foreground">AI Hypotheses:</span>
+            <span className="font-bold text-purple-400">{hypotheses.length}</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-muted-foreground">Approved:</span>
+            <span className="font-bold text-emerald-400">
+              {hypotheses.filter((h) => h.status === "APPROVED" || h.status === "CONVERTED").length}
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-muted-foreground">Analyses:</span>
             <span className="font-bold text-foreground">{analyses.length}</span>
           </div>
         </div>
@@ -504,7 +722,7 @@ export default function AISecurityPage() {
               : "border-transparent text-muted-foreground hover:text-foreground hover:border-muted"
           }`}
         >
-          Attack Hypotheses
+          Attack Hypotheses ({hypotheses.length})
         </button>
         <button
           onClick={() => setActiveTab("history")}
@@ -1075,13 +1293,13 @@ export default function AISecurityPage() {
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-border pb-4">
               <div>
                 <div className="flex items-center gap-2">
-                  <h3 className="text-lg font-bold">Attack Hypotheses Generator</h3>
+                  <h3 className="text-lg font-bold">Human-Approved AI Security Testing</h3>
                   <span className="px-2 py-0.5 rounded text-xs font-semibold bg-purple-500/10 text-purple-400 border border-purple-500/20">
-                    AI HYPOTHESIS
+                    STAGE 9.2
                   </span>
                 </div>
                 <p className="text-sm text-muted-foreground mt-0.5">
-                  Propose safe, grounded attack hypotheses based on observed attack paths. Hypotheses require human verification and are never auto-executed.
+                  AI proposes grounded test hypotheses; human operators review, approve, or reject. Only approved hypotheses can be converted into deterministic Security Tests.
                 </p>
               </div>
 
@@ -1109,81 +1327,241 @@ export default function AISecurityPage() {
               </div>
             </div>
 
-            {/* Caveats Disclaimer */}
-            <div className="p-3 rounded-lg border border-purple-500/30 bg-purple-500/10 text-xs text-purple-300">
-              <strong>Human Review Mandatory:</strong> All generated hypotheses represent unconfirmed, deductive possibilities. SentinelAPI will NOT execute tests against hypotheses automatically without explicit authorization and manual specification.
+            {/* Hard UX Execution Boundary Disclaimer */}
+            <div className="p-3.5 rounded-lg border border-purple-500/30 bg-purple-500/10 space-y-1.5 text-xs text-purple-200">
+              <div className="flex items-center gap-2">
+                <span className="font-bold uppercase tracking-wider text-purple-300">🛡️ Execution Boundary Notice:</span>
+                <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                  NO DIRECT EXECUTION
+                </span>
+              </div>
+              <p className="leading-relaxed">
+                SentinelAPI enforces a strict separation of concerns: AI is an analytical assistant and cannot execute target API requests. Hypotheses require explicit human approval and are converted into deterministic Security Test configurations. To run tests, visit the{" "}
+                <Link href="/security-tests" className="underline font-semibold hover:text-purple-100">
+                  Security Tests
+                </Link>{" "}
+                module.
+              </p>
             </div>
           </Card>
 
-          {/* Hypotheses Cards */}
-          {latestHypothesesAnalysis ? (
-            (() => {
-              const out = (latestHypothesesAnalysis.output || {}) as {
-                hypotheses?: Array<{
-                  hypothesis: string;
-                  reason: string;
-                  required_existing_context: string[];
-                  suggested_test_type: string;
-                  confidence: string;
-                  requires_human_review: boolean;
-                }>;
-                caveats?: string;
-              };
+          {/* Status Filter Tabs */}
+          <div className="flex flex-wrap items-center gap-2 border-b border-border pb-3">
+            {[
+              { key: "ALL", label: "All Hypotheses", count: hypotheses.length },
+              { key: "PENDING_REVIEW", label: "Pending Review", count: hypotheses.filter((h) => h.status === "PENDING_REVIEW").length },
+              { key: "APPROVED", label: "Approved", count: hypotheses.filter((h) => h.status === "APPROVED").length },
+              { key: "CONVERTED", label: "Converted to Test", count: hypotheses.filter((h) => h.status === "CONVERTED").length },
+              { key: "REJECTED", label: "Rejected", count: hypotheses.filter((h) => h.status === "REJECTED").length },
+            ].map((f) => (
+              <button
+                key={f.key}
+                onClick={() => setHypothesisStatusFilter(f.key)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 ${
+                  hypothesisStatusFilter === f.key
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-muted text-muted-foreground hover:bg-muted/80 hover:text-foreground"
+                }`}
+              >
+                <span>{f.label}</span>
+                <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-background/30 font-mono">
+                  {f.count}
+                </span>
+              </button>
+            ))}
+          </div>
 
-              return (
-                <div className="space-y-4">
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {out.hypotheses?.map((h, idx) => (
-                      <Card key={idx} className="p-5 space-y-3.5 border-l-4 border-l-purple-500">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-destructive/10 text-destructive border border-destructive/20">
-                            REQUIRES HUMAN REVIEW
-                          </span>
-                          <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-primary/10 text-primary border border-primary/20">
-                            CONFIDENCE: {h.confidence}
-                          </span>
-                        </div>
-
-                        <div>
-                          <h4 className="text-sm font-semibold text-foreground leading-snug">{h.hypothesis}</h4>
-                          <p className="text-xs text-muted-foreground mt-1.5 leading-relaxed">{h.reason}</p>
-                        </div>
-
-                        <div className="pt-2 border-t border-border space-y-2">
-                          <div>
-                            <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider block mb-1">
-                              Context Prerequisites:
-                            </span>
-                            <div className="flex flex-wrap gap-1.5">
-                              {h.required_existing_context?.map((c, cIdx) => (
-                                <span key={cIdx} className="px-2 py-0.5 rounded text-[10px] bg-muted text-foreground border border-border">
-                                  {c}
-                                </span>
-                              ))}
-                            </div>
-                          </div>
-
-                          <div className="flex items-center justify-between text-xs pt-1">
-                            <span className="text-muted-foreground">Suggested Safe Test:</span>
-                            <span className="font-mono text-primary text-[11px]">{h.suggested_test_type}</span>
-                          </div>
-                        </div>
-                      </Card>
-                    ))}
-                  </div>
-
-                  {out.caveats && (
-                    <div className="text-xs text-muted-foreground italic text-center p-3">
-                      Note: {out.caveats}
-                    </div>
-                  )}
-                </div>
-              );
-            })()
-          ) : (
-            <Card className="p-12 text-center text-sm text-muted-foreground">
-              Select an attack path above to generate grounded lateral movement and misconfiguration hypotheses.
+          {/* Hypotheses List / Cards */}
+          {filteredHypotheses.length === 0 ? (
+            <Card className="p-12 text-center text-sm text-muted-foreground space-y-3">
+              <p>No hypotheses found matching the &quot;{hypothesisStatusFilter}&quot; filter.</p>
+              {hypotheses.length === 0 && (
+                <p className="text-xs text-muted-foreground">
+                  Select an attack path above and click &quot;Generate Hypotheses&quot; to synthesize test proposals.
+                </p>
+              )}
             </Card>
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {filteredHypotheses.map((h) => {
+                const isPending = h.status === "PENDING_REVIEW";
+                const isApproved = h.status === "APPROVED";
+                const isConverted = h.status === "CONVERTED";
+                const isRejected = h.status === "REJECTED";
+
+                return (
+                  <Card
+                    key={h.id}
+                    className={`p-5 space-y-4 border-l-4 transition-all ${
+                      isPending
+                        ? "border-l-amber-500 bg-card"
+                        : isApproved
+                        ? "border-l-emerald-500 bg-card"
+                        : isConverted
+                        ? "border-l-purple-500 bg-card"
+                        : "border-l-destructive/60 bg-muted/20 opacity-80"
+                    }`}
+                  >
+                    {/* Card Header */}
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        {isPending && (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                            PENDING REVIEW
+                          </span>
+                        )}
+                        {isApproved && (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                            HUMAN APPROVED
+                          </span>
+                        )}
+                        {isConverted && (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-purple-500/10 text-purple-400 border border-purple-500/20">
+                            CONVERTED TO TEST
+                          </span>
+                        )}
+                        {isRejected && (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-destructive/10 text-destructive border border-destructive/20">
+                            REJECTED
+                          </span>
+                        )}
+
+                        <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-muted text-muted-foreground border border-border">
+                          CONFIDENCE: {h.confidence}
+                        </span>
+                      </div>
+
+                      <span className="font-mono text-[11px] px-2 py-0.5 rounded bg-primary/10 text-primary border border-primary/20">
+                        {h.suggested_test_type}
+                      </span>
+                    </div>
+
+                    {/* Hypothesis & Reasoning */}
+                    <div>
+                      <h4 className="text-sm font-semibold text-foreground leading-snug">{h.hypothesis}</h4>
+                      <p className="text-xs text-muted-foreground mt-1.5 leading-relaxed">{h.reason}</p>
+                    </div>
+
+                    {/* Associated Target */}
+                    {(h.attack_path_name || h.finding_title) && (
+                      <div className="text-[11px] text-muted-foreground flex items-center gap-2">
+                        <span className="font-semibold uppercase tracking-wider">Grounding:</span>
+                        <span className="truncate">
+                          {h.attack_path_name ? `Path: ${h.attack_path_name}` : `Finding: ${h.finding_title}`}
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Context Prerequisites */}
+                    {h.required_context && Object.keys(h.required_context).length > 0 && (
+                      <div className="space-y-1.5 pt-2 border-t border-border">
+                        <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider block">
+                          Required Grounded Context:
+                        </span>
+                        <div className="flex flex-wrap gap-1.5">
+                          {Object.entries(h.required_context).map(([k, v]) => (
+                            <span
+                              key={k}
+                              className="px-2 py-0.5 rounded text-[10px] bg-muted/60 text-muted-foreground border border-border font-mono"
+                            >
+                              {k}: {String(v)}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Review Meta Info */}
+                    {(h.reviewed_by || h.rejection_reason || h.security_test_id) && (
+                      <div className="p-2.5 rounded bg-muted/30 border border-border text-[11px] space-y-1">
+                        {h.reviewed_by && (
+                          <div className="flex items-center gap-1.5 text-muted-foreground">
+                            <span>Reviewer:</span>
+                            <span className="font-medium text-foreground">{h.reviewed_by}</span>
+                            {h.reviewed_at && (
+                              <span>• {new Date(h.reviewed_at).toLocaleString()}</span>
+                            )}
+                          </div>
+                        )}
+                        {h.rejection_reason && (
+                          <div className="text-destructive">
+                            <span className="font-semibold">Rejection Reason:</span> {h.rejection_reason}
+                          </div>
+                        )}
+                        {h.security_test_id && (
+                          <div className="flex items-center gap-1.5 text-purple-300">
+                            <span className="font-semibold">SecurityTest ID:</span>
+                            <span className="font-mono">{h.security_test_id}</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Action Bar */}
+                    <div className="pt-3 border-t border-border flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        {isPending && (
+                          <>
+                            <Button
+                              size="sm"
+                              variant="primary"
+                              onClick={() => {
+                                setApprovingHypo(h);
+                                setApprovalReviewer("security_reviewer");
+                                setApprovalNotes("");
+                              }}
+                            >
+                              Approve Hypothesis
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="text-destructive hover:bg-destructive/10"
+                              onClick={() => {
+                                setRejectingHypo(h);
+                                setRejectionReviewer("security_reviewer");
+                                setRejectionReason("");
+                              }}
+                            >
+                              Reject
+                            </Button>
+                          </>
+                        )}
+
+                        {isApproved && (
+                          <Button
+                            size="sm"
+                            variant="primary"
+                            disabled={actionInProgress === `convert-${h.id}`}
+                            onClick={() => handleConvertHypothesis(h.id)}
+                          >
+                            {actionInProgress === `convert-${h.id}`
+                              ? "Converting..."
+                              : "Convert to Security Test"}
+                          </Button>
+                        )}
+
+                        {isConverted && (
+                          <Link href="/security-tests">
+                            <Button size="sm" variant="outline" className="text-purple-400 hover:text-purple-300">
+                              View Security Test →
+                            </Button>
+                          </Link>
+                        )}
+                      </div>
+
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handleOpenAudit(h.id)}
+                      >
+                        Audit Trace
+                      </Button>
+                    </div>
+                  </Card>
+                );
+              })}
+            </div>
           )}
         </div>
       )}
@@ -1214,7 +1592,7 @@ export default function AISecurityPage() {
                   <th className="px-4 py-3 text-right">Actions</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-border">
+              <tbody className="divide-y border-border">
                 {analyses.length === 0 ? (
                   <tr>
                     <td colSpan={6} className="px-4 py-8 text-center text-sm text-muted-foreground">
@@ -1338,6 +1716,312 @@ export default function AISecurityPage() {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* HUMAN APPROVAL MODAL */}
+      {/* ========================================================================= */}
+      {approvingHypo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
+          <div className="w-full max-w-lg bg-card border border-border rounded-xl shadow-xl flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between p-4 border-b border-border">
+              <h3 className="font-bold text-base">Approve Security Hypothesis</h3>
+              <button
+                onClick={() => setApprovingHypo(null)}
+                className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground text-sm"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4 text-sm">
+              {/* Mandatory Architectural Safety Text */}
+              <div className="p-3.5 rounded-lg border border-amber-500/40 bg-amber-500/10 text-amber-300 text-xs space-y-1">
+                <span className="font-bold block uppercase tracking-wider">⚠️ Crucial Safety Notice:</span>
+                <p className="leading-relaxed">
+                  Approving this hypothesis will create a deterministic security test configuration. It will NOT execute the target API.
+                </p>
+              </div>
+
+              <div className="space-y-1.5 p-3 rounded-lg bg-muted/30 border border-border text-xs">
+                <div className="font-semibold text-foreground">{approvingHypo.hypothesis}</div>
+                <div className="text-muted-foreground">{approvingHypo.reason}</div>
+                <div className="flex items-center justify-between pt-2 border-t border-border/60 text-[11px]">
+                  <span className="text-muted-foreground">Test Type:</span>
+                  <span className="font-mono text-primary">{approvingHypo.suggested_test_type}</span>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-muted-foreground block mb-1">
+                  Reviewer Reference / Identity:
+                </label>
+                <input
+                  type="text"
+                  className="w-full bg-background border border-input rounded-md px-3 py-1.5 text-sm"
+                  value={approvalReviewer}
+                  onChange={(e) => setApprovalReviewer(e.target.value)}
+                  placeholder="e.g. security_engineer_alice"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-muted-foreground block mb-1">
+                  Approval Notes / Scope Guidance (Optional):
+                </label>
+                <textarea
+                  rows={2}
+                  className="w-full bg-background border border-input rounded-md px-3 py-1.5 text-xs"
+                  value={approvalNotes}
+                  onChange={(e) => setApprovalNotes(e.target.value)}
+                  placeholder="e.g. Verified prerequisite finding is authentic, safe to convert..."
+                />
+              </div>
+            </div>
+
+            <div className="p-4 border-t border-border flex justify-end gap-2 bg-muted/20">
+              <Button variant="outline" size="sm" onClick={() => setApprovingHypo(null)}>
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={actionInProgress === `approve-${approvingHypo.id}`}
+                onClick={() => handleApproveHypothesis(approvingHypo.id)}
+              >
+                {actionInProgress === `approve-${approvingHypo.id}` ? "Approving..." : "Confirm Approval"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* HUMAN REJECTION MODAL */}
+      {/* ========================================================================= */}
+      {rejectingHypo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
+          <div className="w-full max-w-lg bg-card border border-border rounded-xl shadow-xl flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between p-4 border-b border-border">
+              <h3 className="font-bold text-base text-destructive">Reject Security Hypothesis</h3>
+              <button
+                onClick={() => setRejectingHypo(null)}
+                className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground text-sm"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4 text-sm">
+              <p className="text-xs text-muted-foreground">
+                Rejected hypotheses are permanently marked in the audit trail and will not be converted into executable security tests.
+              </p>
+
+              <div className="p-3 rounded-lg bg-muted/30 border border-border text-xs">
+                <div className="font-semibold text-foreground">{rejectingHypo.hypothesis}</div>
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-muted-foreground block mb-1">
+                  Reviewer Reference / Identity:
+                </label>
+                <input
+                  type="text"
+                  className="w-full bg-background border border-input rounded-md px-3 py-1.5 text-sm"
+                  value={rejectionReviewer}
+                  onChange={(e) => setRejectionReviewer(e.target.value)}
+                  placeholder="e.g. security_engineer_alice"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-destructive block mb-1">
+                  Rejection Reason (Mandatory):
+                </label>
+                <textarea
+                  rows={3}
+                  required
+                  className="w-full bg-background border border-input rounded-md px-3 py-1.5 text-xs focus:ring-destructive"
+                  value={rejectionReason}
+                  onChange={(e) => setRejectionReason(e.target.value)}
+                  placeholder="e.g. False premise: endpoint is not exposed externally; out of scope for test tier..."
+                />
+              </div>
+            </div>
+
+            <div className="p-4 border-t border-border flex justify-end gap-2 bg-muted/20">
+              <Button variant="outline" size="sm" onClick={() => setRejectingHypo(null)}>
+                Cancel
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                disabled={!rejectionReason.trim() || actionInProgress === `reject-${rejectingHypo.id}`}
+                onClick={() => handleRejectHypothesis(rejectingHypo.id)}
+              >
+                {actionInProgress === `reject-${rejectingHypo.id}` ? "Rejecting..." : "Confirm Rejection"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* AUDIT LIFECYCLE TRACE MODAL */}
+      {/* ========================================================================= */}
+      {auditHypothesisId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
+          <div className="w-full max-w-3xl max-h-[90vh] bg-card border border-border rounded-xl shadow-xl flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between p-4 border-b border-border">
+              <div>
+                <h3 className="font-bold text-base">Hypothesis Lifecycle Audit Trace</h3>
+                <p className="text-xs font-mono text-muted-foreground">ID: {auditHypothesisId}</p>
+              </div>
+              <button
+                onClick={() => {
+                  setAuditHypothesisId(null);
+                  setAuditData(null);
+                }}
+                className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground text-sm"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-6 overflow-y-auto space-y-6">
+              {loadingAudit ? (
+                <div className="py-12 text-center text-sm text-muted-foreground">
+                  Loading immutable audit log...
+                </div>
+              ) : auditData ? (
+                <>
+                  {/* Hypothesis Header Summary */}
+                  <div className="p-4 rounded-lg bg-muted/30 border border-border space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-semibold text-sm">{auditData.hypothesis.hypothesis}</span>
+                      <span className="font-mono text-xs px-2 py-0.5 rounded bg-primary/10 text-primary border border-primary/20">
+                        {auditData.hypothesis.suggested_test_type}
+                      </span>
+                    </div>
+                    <p className="text-xs text-muted-foreground">{auditData.hypothesis.reason}</p>
+                  </div>
+
+                  {/* Lifecycle Stages */}
+                  <div className="space-y-3">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                      Lifecycle Audit Sequence
+                    </h4>
+                    <div className="space-y-3">
+                      {auditData.lifecycle_stages.map((stage, idx) => {
+                        const isAI = stage.category === "AI ACTION";
+                        const isHuman = stage.category === "HUMAN ACTION";
+                        const isEngine = stage.category === "DETERMINISTIC ENGINE ACTION";
+
+                        return (
+                          <div
+                            key={idx}
+                            className="p-3.5 rounded-lg border border-border bg-card flex flex-col sm:flex-row sm:items-start justify-between gap-3"
+                          >
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-2">
+                                <span
+                                  className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-wide uppercase ${
+                                    isAI
+                                      ? "bg-purple-500/10 text-purple-400 border border-purple-500/20"
+                                      : isHuman
+                                      ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                                      : isEngine
+                                      ? "bg-cyan-500/10 text-cyan-400 border border-cyan-500/20"
+                                      : "bg-muted text-muted-foreground"
+                                  }`}
+                                >
+                                  {stage.category}
+                                </span>
+                                <span className="font-semibold text-xs text-foreground font-mono">
+                                  {stage.stage}
+                                </span>
+                              </div>
+
+                              <p className="text-xs text-muted-foreground">{stage.detail}</p>
+                              {stage.reason && (
+                                <p className="text-xs text-foreground/80 italic">
+                                  Reason: &quot;{stage.reason}&quot;
+                                </p>
+                              )}
+                            </div>
+
+                            <div className="text-right text-[11px] text-muted-foreground shrink-0 space-y-0.5">
+                              <div className="font-medium text-foreground">{stage.actor}</div>
+                              {stage.timestamp && (
+                                <div>{new Date(stage.timestamp).toLocaleTimeString()}</div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Converted Security Test Info (if present) */}
+                  {auditData.security_test && (
+                    <div className="p-4 rounded-lg border border-cyan-500/30 bg-cyan-500/10 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold text-cyan-300 uppercase tracking-wider">
+                          Deterministic Security Test Configuration
+                        </span>
+                        <Link href="/security-tests">
+                          <Button size="sm" variant="outline" className="text-xs h-7">
+                            Open in Security Tests →
+                          </Button>
+                        </Link>
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs pt-1">
+                        <div>
+                          <span className="text-muted-foreground block text-[10px]">Test ID:</span>
+                          <span className="font-mono font-bold">{auditData.security_test.id}</span>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground block text-[10px]">Type:</span>
+                          <span className="font-mono">{auditData.security_test.test_type}</span>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground block text-[10px]">Endpoint:</span>
+                          <span className="truncate block font-mono">
+                            {auditData.security_test.endpoint_method} {auditData.security_test.endpoint_path}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground block text-[10px]">Executions:</span>
+                          <span>
+                            {auditData.security_test.execution_count} (Result:{" "}
+                            {auditData.security_test.latest_execution_result || "Pending"})
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="py-12 text-center text-sm text-destructive">
+                  Failed to load audit trace.
+                </div>
+              )}
+            </div>
+
+            <div className="p-4 border-t border-border flex justify-end bg-muted/20">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => {
+                  setAuditHypothesisId(null);
+                  setAuditData(null);
+                }}
+              >
+                Close Audit
+              </Button>
+            </div>
+          </div>
         </div>
       )}
     </div>

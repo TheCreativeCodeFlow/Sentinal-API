@@ -1,5 +1,5 @@
 """
-Stage 9.1: AI Security Reasoning Package
+Stage 9.1 & 9.2: AI Security Reasoning & Human-Approved Testing Package
 Author: SentinelAPI Security Architecture Team
 """
 
@@ -20,6 +20,19 @@ from app.services.ai.provider import (
     AISecurityService,
     AIProviderError,
 )
+from app.services.ai.hypothesis_validator import (
+    HypothesisValidator,
+    HypothesisValidationError,
+    SUPPORTED_TEST_TYPES,
+)
+from app.services.ai.hypothesis_review import (
+    HypothesisReviewService,
+    HypothesisReviewError,
+)
+from app.services.ai.hypothesis_converter import (
+    HypothesisConverter,
+    HypothesisConversionError,
+)
 
 __all__ = [
     "SecurityContextBuilder",
@@ -33,4 +46,11 @@ __all__ = [
     "get_ai_provider",
     "AISecurityService",
     "AIProviderError",
+    "HypothesisValidator",
+    "HypothesisValidationError",
+    "SUPPORTED_TEST_TYPES",
+    "HypothesisReviewService",
+    "HypothesisReviewError",
+    "HypothesisConverter",
+    "HypothesisConversionError",
 ]
