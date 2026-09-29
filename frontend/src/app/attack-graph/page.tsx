@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState, useMemo } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 
@@ -186,6 +187,30 @@ export default function AttackGraphPage() {
   const [rebuildingImpactId, setRebuildingImpactId] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  const router = useRouter();
+  const [openingInvestigationPathId, setOpeningInvestigationPathId] = useState<string | null>(null);
+
+  const handleOpenInvestigationForPath = async (pathId: string) => {
+    if (!selectedProjectId) return;
+    setOpeningInvestigationPathId(pathId);
+    try {
+      const res = await fetch(`/api/v1/projects/${selectedProjectId}/investigations/from-path/${pathId}`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || "Failed to open investigation for attack path");
+      }
+      const inv = await res.json();
+      router.push(`/investigations/${inv.id}`);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : "Failed to open investigation");
+    } finally {
+      setOpeningInvestigationPathId(null);
+    }
+  };
 
   // Finding Detail Drawer State
   const [selectedFindingId, setSelectedFindingId] = useState<string | null>(null);
@@ -1291,23 +1316,32 @@ export default function AttackGraphPage() {
                         )}
                       </div>
 
-                      {/* Rebuild Path Button */}
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => handleRebuildPath(path.id)}
-                        disabled={rebuildingPathId === path.id}
-                        className="text-xs h-7 px-2.5 border-border hover:bg-muted"
-                      >
-                        {rebuildingPathId === path.id ? (
-                          <span className="flex items-center gap-1">
-                            <span className="inline-block w-2.5 h-2.5 border-2 border-current border-t-transparent rounded-full animate-spin" />
-                            Rebuilding...
-                          </span>
-                        ) : (
-                          "Rebuild Path"
-                        )}
-                      </Button>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          size="sm"
+                          onClick={() => handleOpenInvestigationForPath(path.id)}
+                          disabled={openingInvestigationPathId === path.id}
+                          className="text-xs h-7 px-3 bg-indigo-600 hover:bg-indigo-500 text-white font-medium"
+                        >
+                          {openingInvestigationPathId === path.id ? "Opening Case..." : "⚡ Open Investigation"}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => handleRebuildPath(path.id)}
+                          disabled={rebuildingPathId === path.id}
+                          className="text-xs h-7 px-2.5 border-border hover:bg-muted"
+                        >
+                          {rebuildingPathId === path.id ? (
+                            <span className="flex items-center gap-1">
+                              <span className="inline-block w-2.5 h-2.5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                              Rebuilding...
+                            </span>
+                          ) : (
+                            "Rebuild Path"
+                          )}
+                        </Button>
+                      </div>
                     </div>
 
                     {/* Synthesized Human-Readable Narrative Explanation */}

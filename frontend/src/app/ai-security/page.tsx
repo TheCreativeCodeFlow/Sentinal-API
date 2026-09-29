@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState, useMemo } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 
@@ -152,6 +153,49 @@ export default function AISecurityPage() {
   const [actionInProgress, setActionInProgress] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  const router = useRouter();
+  const [openingInvestigationId, setOpeningInvestigationId] = useState<string | null>(null);
+
+  const handleOpenInvestigationForHypothesis = async (hypo: AIHypothesisDetail) => {
+    if (!selectedProjectId) return;
+    setOpeningInvestigationId(hypo.id);
+    try {
+      let endpoint = `/api/v1/projects/${selectedProjectId}/investigations`;
+      let body: Record<string, unknown> | undefined = {
+        title: `Investigation: ${hypo.suggested_test_type} hypothesis`,
+        description: hypo.hypothesis,
+        primary_finding_id: hypo.finding_id || null,
+        primary_attack_path_id: hypo.attack_path_id || null,
+      };
+
+      if (hypo.finding_id) {
+        endpoint = `/api/v1/projects/${selectedProjectId}/investigations/from-finding/${hypo.finding_id}`;
+        body = undefined;
+      } else if (hypo.attack_path_id) {
+        endpoint = `/api/v1/projects/${selectedProjectId}/investigations/from-path/${hypo.attack_path_id}`;
+        body = undefined;
+      }
+
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: body ? { "Content-Type": "application/json" } : undefined,
+        credentials: "include",
+        body: body ? JSON.stringify(body) : undefined,
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || "Failed to open investigation");
+      }
+      const inv = await res.json();
+      router.push(`/investigations/${inv.id}`);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : "Failed to open investigation");
+    } finally {
+      setOpeningInvestigationId(null);
+    }
+  };
 
   // Tab State
   const [activeTab, setActiveTab] = useState<"findings" | "paths" | "recommendations" | "hypotheses" | "history">("findings");
@@ -1550,13 +1594,23 @@ export default function AISecurityPage() {
                         )}
                       </div>
 
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => handleOpenAudit(h.id)}
-                      >
-                        Audit Trace
-                      </Button>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          size="sm"
+                          className="text-xs h-8 bg-indigo-600 hover:bg-indigo-500 text-white font-medium"
+                          onClick={() => handleOpenInvestigationForHypothesis(h)}
+                          disabled={openingInvestigationId === h.id}
+                        >
+                          {openingInvestigationId === h.id ? "Opening..." : "⚡ Open Investigation"}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => handleOpenAudit(h.id)}
+                        >
+                          Audit Trace
+                        </Button>
+                      </div>
                     </div>
                   </Card>
                 );
@@ -1708,7 +1762,20 @@ export default function AISecurityPage() {
                   </div>
                 </div>
 
-                <div className="p-4 border-t border-border flex justify-end">
+                <div className="p-4 border-t border-border flex justify-end gap-2">
+                  <Button
+                    size="sm"
+                    className="bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs"
+                    onClick={() => {
+                      if (inspectedAnalysis.finding_id) {
+                        router.push(`/investigations?project_id=${selectedProjectId}&finding_id=${inspectedAnalysis.finding_id}`);
+                      } else {
+                        router.push(`/investigations?project_id=${selectedProjectId}`);
+                      }
+                    }}
+                  >
+                    ⚡ Open Investigation Workspace
+                  </Button>
                   <Button variant="secondary" size="sm" onClick={() => setInspectedAnalysis(null)}>
                     Close
                   </Button>

@@ -15,6 +15,12 @@ from app.services.security_engine.workflow_attack_engine import WorkflowAttackEn
 from app.services.security_engine.correlation_engine import CorrelationEngine
 from app.services.security_engine.attack_path_engine import AttackPathEngine
 from app.services.security_engine.impact_engine import ImpactEngine
+from app.services.security_engine.investigation_service import (
+    InvestigationService,
+    InvestigationServiceError,
+    CrossProjectViolationError,
+    InvalidFindingStateError,
+)
 
 __all__ = [
     "AsyncSecurityHttpClient",
@@ -30,6 +36,10 @@ __all__ = [
     "CorrelationEngine",
     "AttackPathEngine",
     "ImpactEngine",
+    "InvestigationService",
+    "InvestigationServiceError",
+    "CrossProjectViolationError",
+    "InvalidFindingStateError",
     "redact_headers",
     "redact_text",
 ]

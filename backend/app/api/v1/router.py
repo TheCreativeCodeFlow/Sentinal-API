@@ -40,6 +40,8 @@ from app.models import (
     AIAnalysis,
     AIHypothesis,
     AIHypothesisReview,
+    SecurityInvestigation,
+    InvestigationItem,
 )
 from app.schemas import (
     ProjectCreate,
@@ -172,11 +174,31 @@ from app.schemas import (
     AIHypothesisConvertResponse,
     AIHypothesisListResponse,
     AIHypothesisAuditResponse,
+    SecurityInvestigationStatus,
+    InvestigationItemType,
+    SecurityInvestigationBase,
+    SecurityInvestigationCreate,
+    SecurityInvestigationUpdate,
+    SecurityInvestigationInDB,
+    SecurityInvestigationDetailInDB,
+    SecurityInvestigationListResponse,
+    InvestigationItemBase,
+    InvestigationItemCreate,
+    InvestigationItemInDB,
+    InvestigationTimelineEvent,
+    InvestigationTimelineResponse,
+    InvestigationContextResponse,
 )
 from app.services.security_engine.redactor import SENSITIVE_HEADER_NAMES
 from app.services.security_engine.correlation_engine import CorrelationEngine
 from app.services.security_engine.attack_path_engine import AttackPathEngine
 from app.services.security_engine.impact_engine import ImpactEngine
+from app.services.security_engine.investigation_service import (
+    InvestigationService,
+    InvestigationServiceError,
+    CrossProjectViolationError,
+    InvalidFindingStateError,
+)
 from app.services.ai import (
     AISecurityService,
     HypothesisReviewService,
@@ -5278,6 +5300,292 @@ def get_ai_hypothesis_audit(
     )
 
 
+# ==============================================================================
+# STAGE 9.3: Security Investigation Workspace Router
+# ==============================================================================
+
+investigation_router = APIRouter(tags=["Security Investigations"])
+
+
+def format_investigation_response(
+    inv: SecurityInvestigation, db: Session
+) -> SecurityInvestigationDetailInDB:
+    primary_f_title = None
+    primary_f_sev = None
+    if inv.primary_finding:
+        primary_f_title = inv.primary_finding.title
+        primary_f_sev = inv.primary_finding.severity
+
+    primary_p_name = None
+    if inv.primary_attack_path:
+        primary_p_name = inv.primary_attack_path.name
+
+    items_in_db = [
+        InvestigationItemInDB(
+            id=item.id,
+            investigation_id=item.investigation_id,
+            item_type=item.item_type,
+            item_id=item.item_id,
+            position=item.position,
+            created_at=item.created_at,
+        )
+        for item in inv.items
+    ]
+
+    return SecurityInvestigationDetailInDB(
+        id=inv.id,
+        project_id=inv.project_id,
+        title=inv.title,
+        description=inv.description,
+        status=inv.status,
+        primary_finding_id=inv.primary_finding_id,
+        primary_attack_path_id=inv.primary_attack_path_id,
+        primary_finding_title=primary_f_title,
+        primary_finding_severity=primary_f_sev,
+        primary_attack_path_name=primary_p_name,
+        item_count=len(inv.items),
+        items=items_in_db,
+        created_at=inv.created_at,
+        updated_at=inv.updated_at,
+        resolved_at=inv.resolved_at,
+    )
+
+
+@investigation_router.post(
+    "/projects/{project_id}/investigations",
+    response_model=SecurityInvestigationDetailInDB,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_investigation(
+    project_id: int,
+    req: SecurityInvestigationCreate,
+    db: Session = Depends(get_db),
+):
+    service = InvestigationService(db=db)
+    try:
+        inv = service.create_investigation(
+            project_id=project_id,
+            title=req.title,
+            description=req.description,
+            primary_finding_id=req.primary_finding_id,
+            primary_attack_path_id=req.primary_attack_path_id,
+        )
+    except CrossProjectViolationError as cpe:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(cpe))
+    except InvestigationServiceError as ise:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ise))
+
+    return format_investigation_response(inv, db)
+
+
+@investigation_router.post(
+    "/projects/{project_id}/investigations/from-finding/{finding_id}",
+    response_model=SecurityInvestigationDetailInDB,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_investigation_from_finding(
+    project_id: int,
+    finding_id: str,
+    title: Optional[str] = None,
+    description: Optional[str] = None,
+    force_new: bool = False,
+    db: Session = Depends(get_db),
+):
+    service = InvestigationService(db=db)
+    try:
+        inv = service.create_from_finding(
+            project_id=project_id,
+            finding_id=finding_id,
+            title=title,
+            description=description,
+            force_new=force_new,
+        )
+    except InvalidFindingStateError as ifse:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ifse))
+    except CrossProjectViolationError as cpe:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(cpe))
+    except InvestigationServiceError as ise:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ise))
+
+    return format_investigation_response(inv, db)
+
+
+@investigation_router.post(
+    "/projects/{project_id}/investigations/from-path/{attack_path_id}",
+    response_model=SecurityInvestigationDetailInDB,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_investigation_from_attack_path(
+    project_id: int,
+    attack_path_id: str,
+    title: Optional[str] = None,
+    description: Optional[str] = None,
+    force_new: bool = False,
+    db: Session = Depends(get_db),
+):
+    service = InvestigationService(db=db)
+    try:
+        inv = service.create_from_attack_path(
+            project_id=project_id,
+            attack_path_id=attack_path_id,
+            title=title,
+            description=description,
+            force_new=force_new,
+        )
+    except CrossProjectViolationError as cpe:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(cpe))
+    except InvestigationServiceError as ise:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ise))
+
+    return format_investigation_response(inv, db)
+
+
+@investigation_router.get(
+    "/projects/{project_id}/investigations",
+    response_model=SecurityInvestigationListResponse,
+)
+def list_project_investigations(
+    project_id: int,
+    status: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    get_project_or_404(project_id, db)
+    query = db.query(SecurityInvestigation).filter(SecurityInvestigation.project_id == project_id)
+    if status:
+        query = query.filter(SecurityInvestigation.status == status.upper())
+
+    investigations = query.order_by(SecurityInvestigation.created_at.desc()).all()
+    formatted = [format_investigation_response(inv, db) for inv in investigations]
+    return SecurityInvestigationListResponse(
+        project_id=project_id,
+        count=len(formatted),
+        investigations=formatted,
+    )
+
+
+@investigation_router.get(
+    "/investigations/{investigation_id}",
+    response_model=SecurityInvestigationDetailInDB,
+)
+def get_investigation(
+    investigation_id: str,
+    db: Session = Depends(get_db),
+):
+    inv = db.query(SecurityInvestigation).filter(SecurityInvestigation.id == investigation_id).first()
+    if not inv:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Investigation '{investigation_id}' not found",
+        )
+    return format_investigation_response(inv, db)
+
+
+@investigation_router.patch(
+    "/investigations/{investigation_id}",
+    response_model=SecurityInvestigationDetailInDB,
+)
+def update_investigation(
+    investigation_id: str,
+    req: SecurityInvestigationUpdate,
+    db: Session = Depends(get_db),
+):
+    service = InvestigationService(db=db)
+    try:
+        inv = service.update_investigation(
+            investigation_id=investigation_id,
+            title=req.title,
+            description=req.description,
+            status=req.status,
+        )
+    except InvestigationServiceError as ise:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ise))
+
+    return format_investigation_response(inv, db)
+
+
+@investigation_router.post(
+    "/investigations/{investigation_id}/items",
+    response_model=InvestigationItemInDB,
+    status_code=status.HTTP_201_CREATED,
+)
+def attach_investigation_item(
+    investigation_id: str,
+    req: InvestigationItemCreate,
+    db: Session = Depends(get_db),
+):
+    service = InvestigationService(db=db)
+    try:
+        item = service.attach_item(
+            investigation_id=investigation_id,
+            item_type=req.item_type,
+            item_id=req.item_id,
+            position=req.position,
+        )
+    except InvalidFindingStateError as ifse:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ifse))
+    except CrossProjectViolationError as cpe:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(cpe))
+    except InvestigationServiceError as ise:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ise))
+
+    return InvestigationItemInDB.model_validate(item)
+
+
+@investigation_router.delete(
+    "/investigations/{investigation_id}/items/{item_id}",
+)
+def detach_investigation_item(
+    investigation_id: str,
+    item_id: str,
+    db: Session = Depends(get_db),
+):
+    service = InvestigationService(db=db)
+    detached = service.detach_item(investigation_id=investigation_id, item_id=item_id)
+    if not detached:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Item '{item_id}' not found in investigation '{investigation_id}'",
+        )
+    return {"message": "Item successfully detached from investigation", "item_id": item_id}
+
+
+@investigation_router.get(
+    "/investigations/{investigation_id}/timeline",
+    response_model=InvestigationTimelineResponse,
+)
+def get_investigation_timeline(
+    investigation_id: str,
+    db: Session = Depends(get_db),
+):
+    service = InvestigationService(db=db)
+    try:
+        events = service.get_investigation_timeline(investigation_id=investigation_id)
+    except InvestigationServiceError as ise:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(ise))
+
+    return InvestigationTimelineResponse(
+        investigation_id=investigation_id,
+        events=[InvestigationTimelineEvent(**e) for e in events],
+    )
+
+
+@investigation_router.get(
+    "/investigations/{investigation_id}/context",
+    response_model=InvestigationContextResponse,
+)
+def get_investigation_context(
+    investigation_id: str,
+    db: Session = Depends(get_db),
+):
+    service = InvestigationService(db=db)
+    try:
+        ctx = service.get_investigation_context(investigation_id=investigation_id)
+    except InvestigationServiceError as ise:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(ise))
+
+    return InvestigationContextResponse(**ctx)
+
+
 # Include sub-routers into main router
 router.include_router(project_router)
 router.include_router(api_router)
@@ -5299,3 +5607,4 @@ router.include_router(correlation_router)
 router.include_router(attack_path_router)
 router.include_router(impact_router)
 router.include_router(ai_router)
+router.include_router(investigation_router)

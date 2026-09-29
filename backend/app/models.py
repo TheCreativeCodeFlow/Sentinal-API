@@ -10,6 +10,7 @@ from sqlalchemy import (
     Index,
     Table,
     JSON,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -52,6 +53,7 @@ class Project(Base):
     security_impacts = relationship("SecurityImpact", back_populates="project", cascade="all, delete-orphan")
     ai_analyses = relationship("AIAnalysis", back_populates="project", cascade="all, delete-orphan")
     ai_hypotheses = relationship("AIHypothesis", back_populates="project", cascade="all, delete-orphan")
+    investigations = relationship("SecurityInvestigation", back_populates="project", cascade="all, delete-orphan")
 
 
 class API(Base):
@@ -1084,6 +1086,62 @@ class AIHypothesisReview(Base):
     )
 
 
+# ==============================================================================
+# STAGE 9.3: Security Investigation Workspace Models
+# ==============================================================================
+
+class SecurityInvestigation(Base):
+    __tablename__ = "security_investigations"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    status = Column(String(50), nullable=False, default="OPEN", index=True)  # OPEN, IN_REVIEW, RESOLVED, ARCHIVED
+    primary_finding_id = Column(String(36), ForeignKey("findings.id", ondelete="SET NULL"), nullable=True, index=True)
+    primary_attack_path_id = Column(String(36), ForeignKey("attack_paths.id", ondelete="SET NULL"), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+
+    project = relationship("Project", back_populates="investigations")
+    primary_finding = relationship("Finding", foreign_keys=[primary_finding_id])
+    primary_attack_path = relationship("AttackPath", foreign_keys=[primary_attack_path_id])
+    items = relationship(
+        "InvestigationItem",
+        back_populates="investigation",
+        cascade="all, delete-orphan",
+        order_by="InvestigationItem.position.asc()",
+    )
+
+    __table_args__ = (
+        Index("ix_investigations_project_status", "project_id", "status"),
+        Index("ix_investigations_finding", "primary_finding_id"),
+        Index("ix_investigations_path", "primary_attack_path_id"),
+    )
+
+
+class InvestigationItem(Base):
+    __tablename__ = "investigation_items"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    investigation_id = Column(String(36), ForeignKey("security_investigations.id", ondelete="CASCADE"), nullable=False, index=True)
+    item_type = Column(String(50), nullable=False, index=True)  # FINDING, EVIDENCE, ATTACK_GRAPH, ATTACK_PATH, SECURITY_IMPACT, AI_ANALYSIS, AI_HYPOTHESIS, SECURITY_TEST, WORKFLOW_EXECUTION
+    item_id = Column(String(255), nullable=False, index=True)
+    position = Column(Integer, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    investigation = relationship("SecurityInvestigation", back_populates="items")
+
+    __table_args__ = (
+        UniqueConstraint("investigation_id", "item_type", "item_id", name="uq_investigation_item_target"),
+        UniqueConstraint("investigation_id", "position", name="uq_investigation_item_position"),
+        Index("ix_investigation_items_inv_type", "investigation_id", "item_type"),
+    )
+
+
 # Prevent pytest from treating model classes as test case classes
 AttackGraph.__test__ = False
 AttackGraphNode.__test__ = False
@@ -1095,3 +1153,7 @@ SecurityImpact.__test__ = False
 AIAnalysis.__test__ = False
 AIHypothesis.__test__ = False
 AIHypothesisReview.__test__ = False
+SecurityInvestigation.__test__ = False
+InvestigationItem.__test__ = False
+SecurityTest.__test__ = False
+TestExecution.__test__ = False

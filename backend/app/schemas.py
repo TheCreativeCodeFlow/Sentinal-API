@@ -1351,3 +1351,121 @@ class AIHypothesisAuditResponse(BaseModel):
     reviews: List[AIHypothesisReviewInDB] = []
     security_test: Optional[Dict[str, Any]] = None
     lifecycle_stages: List[Dict[str, Any]] = []
+
+
+# ==============================================================================
+# STAGE 9.3: Security Investigation Workspace Schemas
+# ==============================================================================
+
+class SecurityInvestigationStatus(str, Enum):
+    OPEN = "OPEN"
+    IN_REVIEW = "IN_REVIEW"
+    RESOLVED = "RESOLVED"
+    ARCHIVED = "ARCHIVED"
+
+
+class InvestigationItemType(str, Enum):
+    FINDING = "FINDING"
+    EVIDENCE = "EVIDENCE"
+    ATTACK_GRAPH = "ATTACK_GRAPH"
+    ATTACK_PATH = "ATTACK_PATH"
+    SECURITY_IMPACT = "SECURITY_IMPACT"
+    AI_ANALYSIS = "AI_ANALYSIS"
+    AI_HYPOTHESIS = "AI_HYPOTHESIS"
+    SECURITY_TEST = "SECURITY_TEST"
+    WORKFLOW_EXECUTION = "WORKFLOW_EXECUTION"
+
+
+class InvestigationItemBase(BaseModel):
+    item_type: str
+    item_id: str
+    position: Optional[int] = None
+
+
+class InvestigationItemCreate(InvestigationItemBase):
+    pass
+
+
+class InvestigationItemInDB(InvestigationItemBase):
+    id: str
+    investigation_id: str
+    position: int
+    created_at: datetime
+    item_summary: Optional[Dict[str, Any]] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SecurityInvestigationBase(BaseModel):
+    title: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = None
+    status: str = "OPEN"
+    primary_finding_id: Optional[str] = None
+    primary_attack_path_id: Optional[str] = None
+
+
+class SecurityInvestigationCreate(SecurityInvestigationBase):
+    pass
+
+
+class SecurityInvestigationUpdate(BaseModel):
+    title: Optional[str] = Field(None, min_length=1, max_length=255)
+    description: Optional[str] = None
+    status: Optional[str] = None
+
+
+class SecurityInvestigationInDB(SecurityInvestigationBase):
+    id: str
+    project_id: int
+    created_at: datetime
+    updated_at: datetime
+    resolved_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SecurityInvestigationDetailInDB(SecurityInvestigationInDB):
+    primary_finding_title: Optional[str] = None
+    primary_finding_severity: Optional[str] = None
+    primary_attack_path_name: Optional[str] = None
+    item_count: int = 0
+    items: List[InvestigationItemInDB] = []
+
+
+class SecurityInvestigationListResponse(BaseModel):
+    project_id: int
+    count: int
+    investigations: List[SecurityInvestigationDetailInDB] = []
+
+
+class InvestigationTimelineEvent(BaseModel):
+    id: str
+    event_type: str
+    category: str  # VERIFIED, DETERMINISTIC, AI, HUMAN, ENGINE
+    timestamp: Optional[str] = None
+    title: str
+    description: str
+    source_type: str
+    source_id: str
+    metadata: Dict[str, Any] = {}
+
+
+class InvestigationTimelineResponse(BaseModel):
+    investigation_id: str
+    events: List[InvestigationTimelineEvent] = []
+
+
+class InvestigationContextResponse(BaseModel):
+    investigation: SecurityInvestigationDetailInDB
+    primary_finding: Optional[Dict[str, Any]] = None
+    primary_attack_path: Optional[Dict[str, Any]] = None
+    evidence: List[Dict[str, Any]] = []
+    findings: List[Dict[str, Any]] = []
+    attack_graphs: List[Dict[str, Any]] = []
+    attack_paths: List[Dict[str, Any]] = []
+    security_impacts: List[Dict[str, Any]] = []
+    ai_analyses: List[Dict[str, Any]] = []
+    ai_hypotheses: List[Dict[str, Any]] = []
+    security_tests: List[Dict[str, Any]] = []
+    workflow_executions: List[Dict[str, Any]] = []
+    summary_counts: Dict[str, int] = {}

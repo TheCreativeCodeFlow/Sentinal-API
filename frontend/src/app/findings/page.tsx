@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 
@@ -76,7 +77,30 @@ export default function FindingsPage() {
   const [replaying, setReplaying] = useState(false);
   const [replayResult, setReplayResult] = useState<string | null>(null);
 
+  const router = useRouter();
+  const [investigatingId, setInvestigatingId] = useState<string | null>(null);
+
   const activeProject = projects.find((p) => p.id === selectedProjectId);
+
+  const handleInvestigateFinding = async (projectId: number, findingId: string) => {
+    setInvestigatingId(findingId);
+    try {
+      const res = await fetch(`/api/v1/projects/${projectId}/investigations/from-finding/${findingId}`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || "Failed to open investigation");
+      }
+      const inv = await res.json();
+      router.push(`/investigations/${inv.id}`);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to launch investigation");
+    } finally {
+      setInvestigatingId(null);
+    }
+  };
 
   // 1. Load projects
   useEffect(() => {
@@ -406,10 +430,23 @@ export default function FindingsPage() {
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-4 shrink-0">
+                  <div className="flex items-center gap-3 shrink-0">
                     <span className="text-xs text-muted-foreground">
                       {new Date(finding.created_at).toLocaleDateString()}
                     </span>
+                    {finding.status === "CONFIRMED" && (
+                      <Button
+                        size="sm"
+                        className="text-xs h-8 bg-indigo-600 hover:bg-indigo-500 text-white font-medium"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleInvestigateFinding(finding.project_id, finding.id);
+                        }}
+                        disabled={investigatingId === finding.id}
+                      >
+                        {investigatingId === finding.id ? "Opening..." : "⚡ Investigate"}
+                      </Button>
+                    )}
                     <Button variant="secondary" size="sm">
                       View Details
                     </Button>
@@ -706,6 +743,15 @@ export default function FindingsPage() {
                 <Button variant="outline" onClick={() => setSelectedFinding(null)}>
                   Close
                 </Button>
+                {selectedFinding.status === "CONFIRMED" && (
+                  <Button
+                    onClick={() => handleInvestigateFinding(selectedFinding.project_id, selectedFinding.id)}
+                    disabled={investigatingId === selectedFinding.id}
+                    className="bg-indigo-600 hover:bg-indigo-500 text-white"
+                  >
+                    {investigatingId === selectedFinding.id ? "Launching..." : "⚡ Investigate Case"}
+                  </Button>
+                )}
                 <Button
                   onClick={() => handleReplay(selectedFinding.id)}
                   disabled={replaying || activeProject?.authorization_status.toLowerCase() !== "authorized"}
