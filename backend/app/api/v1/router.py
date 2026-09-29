@@ -37,6 +37,7 @@ from app.models import (
     AttackPath,
     AttackPathStep,
     SecurityImpact,
+    AIAnalysis,
 )
 from app.schemas import (
     ProjectCreate,
@@ -151,11 +152,19 @@ from app.schemas import (
     SecurityImpactInDB,
     SecurityImpactDetailInDB,
     SecurityImpactAnalysisResponse,
+    AIAnalysisType,
+    AIAnalysisBase,
+    AIAnalysisInDB,
+    AIAnalysisDetailInDB,
+    AIAnalysisResponse,
+    AIAnalysesListResponse,
+    AIAnalyzeRequest,
 )
 from app.services.security_engine.redactor import SENSITIVE_HEADER_NAMES
 from app.services.security_engine.correlation_engine import CorrelationEngine
 from app.services.security_engine.attack_path_engine import AttackPathEngine
 from app.services.security_engine.impact_engine import ImpactEngine
+from app.services.ai import AISecurityService
 
 
 
@@ -4685,6 +4694,279 @@ def rebuild_security_impact(
     return format_security_impact_response(updated, db)
 
 
+# ==============================================================================
+# STAGE 9.1: AI Security Reasoning Routers
+# ==============================================================================
+ai_router = APIRouter(tags=["AI Security Reasoning"])
+
+
+def format_ai_analysis_response(analysis: AIAnalysis, db: Session) -> AIAnalysisDetailInDB:
+    finding = db.query(Finding).filter(Finding.id == analysis.finding_id).first() if analysis.finding_id else None
+    path = db.query(AttackPath).filter(AttackPath.id == analysis.attack_path_id).first() if analysis.attack_path_id else None
+
+    return AIAnalysisDetailInDB(
+        id=analysis.id,
+        project_id=analysis.project_id,
+        attack_path_id=analysis.attack_path_id,
+        finding_id=analysis.finding_id,
+        analysis_type=analysis.analysis_type,
+        status=analysis.status,
+        model_provider=analysis.model_provider,
+        model_name=analysis.model_name,
+        input_context=analysis.input_context or {},
+        output=analysis.output,
+        error_message=analysis.error_message,
+        created_at=analysis.created_at,
+        completed_at=analysis.completed_at,
+        finding_title=finding.title if finding else None,
+        finding_type=finding.type if finding else None,
+        attack_path_name=path.name if path else None,
+    )
+
+
+@ai_router.post(
+    "/projects/{project_id}/ai/analyze/finding/{finding_id}",
+    response_model=AIAnalysisResponse,
+)
+def analyze_finding_with_ai(
+    project_id: int,
+    finding_id: str,
+    req: Optional[AIAnalyzeRequest] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Run AI security reasoning on a confirmed finding.
+    Strictly analytical; never executes target requests or alters findings.
+    """
+    project = get_project_or_404(project_id, db)
+    finding = db.query(Finding).filter(Finding.id == finding_id, Finding.project_id == project.id).first()
+    if not finding:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Finding {finding_id} not found in project {project_id}",
+        )
+
+    analysis_type = req.analysis_type if (req and req.analysis_type) else AIAnalysisType.FINDING_EXPLANATION.value
+
+    service = AISecurityService(db=db)
+    try:
+        analysis = service.analyze_finding(finding_id=finding.id, analysis_type=analysis_type)
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(ve),
+        )
+
+    return AIAnalysisResponse(analysis=format_ai_analysis_response(analysis, db))
+
+
+@ai_router.post(
+    "/projects/{project_id}/ai/analyze/path/{path_id}",
+    response_model=AIAnalysisResponse,
+)
+def analyze_attack_path_with_ai(
+    project_id: int,
+    path_id: str,
+    req: Optional[AIAnalyzeRequest] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Run AI security reasoning on an active deterministic attack path.
+    Synthesizes the chained findings into an explainable narrative.
+    """
+    project = get_project_or_404(project_id, db)
+    path = db.query(AttackPath).filter(AttackPath.id == path_id, AttackPath.project_id == project.id).first()
+    if not path:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Attack path {path_id} not found in project {project_id}",
+        )
+
+    analysis_type = req.analysis_type if (req and req.analysis_type) else AIAnalysisType.ATTACK_PATH_EXPLANATION.value
+
+    service = AISecurityService(db=db)
+    try:
+        analysis = service.analyze_attack_path(attack_path_id=path.id, analysis_type=analysis_type)
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(ve),
+        )
+
+    return AIAnalysisResponse(analysis=format_ai_analysis_response(analysis, db))
+
+
+@ai_router.post(
+    "/projects/{project_id}/ai/analyze/impact/{impact_id}",
+    response_model=AIAnalysisResponse,
+)
+def analyze_impact_with_ai(
+    project_id: int,
+    impact_id: str,
+    req: Optional[AIAnalyzeRequest] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Run AI security reasoning on a deterministic SecurityImpact record.
+    Explains boundary crossing and business implications.
+    """
+    project = get_project_or_404(project_id, db)
+    impact = db.query(SecurityImpact).filter(SecurityImpact.id == impact_id, SecurityImpact.project_id == project.id).first()
+    if not impact:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Security impact {impact_id} not found in project {project_id}",
+        )
+
+    analysis_type = req.analysis_type if (req and req.analysis_type) else AIAnalysisType.IMPACT_EXPLANATION.value
+
+    service = AISecurityService(db=db)
+    try:
+        analysis = service.analyze_security_impact(impact_id=impact.id, analysis_type=analysis_type)
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(ve),
+        )
+
+    return AIAnalysisResponse(analysis=format_ai_analysis_response(analysis, db))
+
+
+@ai_router.post(
+    "/projects/{project_id}/ai/hypotheses/path/{path_id}",
+    response_model=AIAnalysisResponse,
+)
+def generate_attack_path_hypotheses(
+    project_id: int,
+    path_id: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Generate grounded attack hypotheses for an attack path.
+    Hypotheses are strictly labeled as requiring human review and are never auto-executed.
+    """
+    project = get_project_or_404(project_id, db)
+    path = db.query(AttackPath).filter(AttackPath.id == path_id, AttackPath.project_id == project.id).first()
+    if not path:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Attack path {path_id} not found in project {project_id}",
+        )
+
+    service = AISecurityService(db=db)
+    try:
+        analysis = service.generate_attack_hypotheses(attack_path_id=path.id)
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(ve),
+        )
+
+    return AIAnalysisResponse(analysis=format_ai_analysis_response(analysis, db))
+
+
+@ai_router.post(
+    "/projects/{project_id}/ai/recommendations",
+    response_model=AIAnalysisResponse,
+)
+def generate_security_recommendations(
+    project_id: int,
+    finding_id: Optional[str] = None,
+    attack_path_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Generate actionable tactical and architectural recommendations for a finding or attack path.
+    """
+    project = get_project_or_404(project_id, db)
+    if not finding_id and not attack_path_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Must provide either finding_id or attack_path_id",
+        )
+
+    service = AISecurityService(db=db)
+    try:
+        analysis = service.generate_recommendations(
+            finding_id=finding_id,
+            attack_path_id=attack_path_id,
+        )
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(ve),
+        )
+
+    return AIAnalysisResponse(analysis=format_ai_analysis_response(analysis, db))
+
+
+@ai_router.post(
+    "/projects/{project_id}/ai/report-summary",
+    response_model=AIAnalysisResponse,
+)
+def generate_project_report_summary(
+    project_id: int,
+    db: Session = Depends(get_db),
+):
+    """
+    Generate an executive AI security report summary for the project.
+    """
+    project = get_project_or_404(project_id, db)
+    service = AISecurityService(db=db)
+    analysis = service.generate_report_summary(project_id=project.id)
+    return AIAnalysisResponse(analysis=format_ai_analysis_response(analysis, db))
+
+
+@ai_router.get(
+    "/projects/{project_id}/ai/analyses",
+    response_model=AIAnalysesListResponse,
+)
+def list_project_ai_analyses(
+    project_id: int,
+    analysis_type: Optional[str] = None,
+    finding_id: Optional[str] = None,
+    attack_path_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """List historical AI analyses performed for a project."""
+    project = get_project_or_404(project_id, db)
+    query = db.query(AIAnalysis).filter(AIAnalysis.project_id == project.id)
+
+    if analysis_type:
+        query = query.filter(AIAnalysis.analysis_type == analysis_type)
+    if finding_id:
+        query = query.filter(AIAnalysis.finding_id == finding_id)
+    if attack_path_id:
+        query = query.filter(AIAnalysis.attack_path_id == attack_path_id)
+
+    analyses = query.order_by(AIAnalysis.created_at.desc()).all()
+    formatted = [format_ai_analysis_response(a, db) for a in analyses]
+
+    return AIAnalysesListResponse(
+        project_id=project.id,
+        count=len(formatted),
+        analyses=formatted,
+    )
+
+
+@ai_router.get(
+    "/ai/analyses/{analysis_id}",
+    response_model=AIAnalysisResponse,
+)
+def get_ai_analysis(
+    analysis_id: str,
+    db: Session = Depends(get_db),
+):
+    """Get single AI analysis by ID."""
+    analysis = db.query(AIAnalysis).filter(AIAnalysis.id == analysis_id).first()
+    if not analysis:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"AI analysis {analysis_id} not found",
+        )
+    return AIAnalysisResponse(analysis=format_ai_analysis_response(analysis, db))
+
+
 # Include sub-routers into main router
 router.include_router(project_router)
 router.include_router(api_router)
@@ -4705,3 +4987,4 @@ router.include_router(workflow_router)
 router.include_router(correlation_router)
 router.include_router(attack_path_router)
 router.include_router(impact_router)
+router.include_router(ai_router)

@@ -1136,3 +1136,118 @@ class SecurityImpactAnalysisResponse(BaseModel):
     project_id: int
     impacts_count: int
     impacts: List[SecurityImpactDetailInDB] = []
+
+
+# ==============================================================================
+# STAGE 9.1: AI Security Reasoning Schemas
+# ==============================================================================
+
+from enum import Enum
+
+
+class AIAnalysisType(str, Enum):
+    FINDING_EXPLANATION = "FINDING_EXPLANATION"
+    ATTACK_PATH_EXPLANATION = "ATTACK_PATH_EXPLANATION"
+    IMPACT_EXPLANATION = "IMPACT_EXPLANATION"
+    SECURITY_RECOMMENDATION = "SECURITY_RECOMMENDATION"
+    ATTACK_HYPOTHESIS = "ATTACK_HYPOTHESIS"
+    REPORT_SUMMARY = "REPORT_SUMMARY"
+
+
+class FindingExplanationOutput(BaseModel):
+    finding_id: str
+    summary: str
+    root_cause_analysis: str
+    evidence_corroboration: str
+    potential_misconfigurations: List[str] = []
+    recommended_investigation: str
+
+
+class AttackPathExplanationOutput(BaseModel):
+    attack_path_id: str
+    path_narrative: str
+    prerequisite_analysis: str
+    step_by_step_breakdown: List[Dict[str, Any]] = []
+    exploitability_factors: str
+    critical_choke_point: str
+
+
+class ImpactExplanationOutput(BaseModel):
+    impact_id: str
+    terminal_impact_interpretation: str
+    crossed_boundaries_explained: List[Dict[str, str]] = []
+    business_risk_translation: str
+    data_exposure_implications: str
+
+
+class SecurityRecommendationOutput(BaseModel):
+    target_type: str
+    target_id: str
+    immediate_mitigations: List[str] = []
+    architectural_remediations: List[str] = []
+    preventative_controls: List[str] = []
+    code_level_guidance: Optional[str] = None
+
+
+class AttackHypothesisItem(BaseModel):
+    hypothesis: str
+    reason: str
+    required_existing_context: List[str] = []
+    suggested_test_type: str
+    confidence: str = Field(..., pattern="^(LOW|MEDIUM|HIGH)$")
+    requires_human_review: bool = True
+
+
+class AttackHypothesesOutput(BaseModel):
+    attack_path_id: str
+    hypotheses: List[AttackHypothesisItem] = []
+    caveats: str
+
+
+class ReportSummaryOutput(BaseModel):
+    project_id: int
+    executive_summary: str
+    key_exposure_themes: List[str] = []
+    highest_risk_paths: List[str] = []
+    strategic_recommendations: List[str] = []
+
+
+class AIAnalysisBase(BaseModel):
+    project_id: int
+    attack_path_id: Optional[str] = None
+    finding_id: Optional[str] = None
+    analysis_type: str
+    status: str = "QUEUED"
+    model_provider: str
+    model_name: str
+    input_context: Dict[str, Any]
+    output: Optional[Dict[str, Any]] = None
+    error_message: Optional[str] = None
+
+
+class AIAnalysisInDB(AIAnalysisBase):
+    id: str
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AIAnalysisDetailInDB(AIAnalysisInDB):
+    finding_title: Optional[str] = None
+    finding_type: Optional[str] = None
+    attack_path_name: Optional[str] = None
+
+
+class AIAnalysisResponse(BaseModel):
+    analysis: AIAnalysisDetailInDB
+
+
+class AIAnalysesListResponse(BaseModel):
+    project_id: int
+    count: int
+    analyses: List[AIAnalysisDetailInDB] = []
+
+
+class AIAnalyzeRequest(BaseModel):
+    analysis_type: Optional[str] = None

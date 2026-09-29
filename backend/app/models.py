@@ -50,6 +50,7 @@ class Project(Base):
     correlations = relationship("FindingCorrelation", back_populates="project", cascade="all, delete-orphan")
     attack_paths = relationship("AttackPath", back_populates="project", cascade="all, delete-orphan")
     security_impacts = relationship("SecurityImpact", back_populates="project", cascade="all, delete-orphan")
+    ai_analyses = relationship("AIAnalysis", back_populates="project", cascade="all, delete-orphan")
 
 
 class API(Base):
@@ -336,6 +337,7 @@ class Finding(Base):
     graph_nodes = relationship("AttackGraphNode", back_populates="finding")
     path_steps = relationship("AttackPathStep", foreign_keys="AttackPathStep.finding_id", back_populates="finding")
     security_impacts = relationship("SecurityImpact", back_populates="finding", cascade="all, delete-orphan")
+    ai_analyses = relationship("AIAnalysis", back_populates="finding", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("ix_findings_project_severity", "project_id", "severity"),
@@ -918,6 +920,7 @@ class AttackPath(Base):
         order_by="AttackPathStep.position",
     )
     security_impacts = relationship("SecurityImpact", back_populates="attack_path", cascade="all, delete-orphan")
+    ai_analyses = relationship("AIAnalysis", back_populates="attack_path", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("ix_attack_paths_project_status", "project_id", "status"),
@@ -987,6 +990,37 @@ class SecurityImpact(Base):
     )
 
 
+# ==============================================================================
+# STAGE 9.1: AI Security Reasoning Models
+# ==============================================================================
+
+class AIAnalysis(Base):
+    __tablename__ = "ai_analyses"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    attack_path_id = Column(String(36), ForeignKey("attack_paths.id", ondelete="CASCADE"), nullable=True, index=True)
+    finding_id = Column(String(36), ForeignKey("findings.id", ondelete="CASCADE"), nullable=True, index=True)
+    analysis_type = Column(String(50), nullable=False, index=True)  # FINDING_EXPLANATION, ATTACK_PATH_EXPLANATION, etc.
+    status = Column(String(20), nullable=False, default="QUEUED", index=True)  # QUEUED, RUNNING, COMPLETED, FAILED
+    model_provider = Column(String(50), nullable=False, default="mock")
+    model_name = Column(String(100), nullable=False, default="mock-security-reasoner")
+    input_context = Column(JSON, nullable=False)
+    output = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    error_message = Column(Text, nullable=True)
+
+    project = relationship("Project", back_populates="ai_analyses")
+    attack_path = relationship("AttackPath", back_populates="ai_analyses")
+    finding = relationship("Finding", back_populates="ai_analyses")
+
+    __table_args__ = (
+        Index("ix_ai_analyses_project_status", "project_id", "status"),
+        Index("ix_ai_analyses_project_type", "project_id", "analysis_type"),
+    )
+
+
 # Prevent pytest from treating model classes as test case classes
 AttackGraph.__test__ = False
 AttackGraphNode.__test__ = False
@@ -995,3 +1029,4 @@ FindingCorrelation.__test__ = False
 AttackPath.__test__ = False
 AttackPathStep.__test__ = False
 SecurityImpact.__test__ = False
+AIAnalysis.__test__ = False
