@@ -18,6 +18,8 @@ const menuItems = [
   { href: "/attack-graph", label: "Attack Graph", key: "7f" },
   { href: "/ai-security", label: "AI Security", key: "7g" },
   { href: "/investigations", label: "Investigations", key: "7h" },
+  { href: "/test-suites", label: "Test Suites", key: "7i" },
+  { href: "/execution-plans", label: "Execution Plans", key: "7j" },
   { href: "/security-tests", label: "Security Tests", key: "8" },
   { href: "/findings", label: "Findings", key: "9" },
   { href: "/attack-surface", label: "Attack Surface", key: "10" },

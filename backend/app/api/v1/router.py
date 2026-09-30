@@ -42,6 +42,10 @@ from app.models import (
     AIHypothesisReview,
     SecurityInvestigation,
     InvestigationItem,
+    SecurityTestSuite,
+    SecurityTestSuiteItem,
+    SecurityExecutionPlan,
+    SecurityExecutionItem,
 )
 from app.schemas import (
     ProjectCreate,
@@ -188,6 +192,25 @@ from app.schemas import (
     InvestigationTimelineEvent,
     InvestigationTimelineResponse,
     InvestigationContextResponse,
+    TestSuiteStatus,
+    ExecutionPlanStatus,
+    ExecutionMode,
+    ExecutionItemStatus,
+    SecurityTestSuiteItemBase,
+    SecurityTestSuiteItemCreate,
+    SecurityTestSuiteItemUpdate,
+    SecurityTestSuiteItemInDB,
+    SecurityTestSuiteBase,
+    SecurityTestSuiteCreate,
+    SecurityTestSuiteUpdate,
+    SecurityTestSuiteInDB,
+    SecurityTestSuiteListResponse,
+    SecurityExecutionItemInDB,
+    SecurityExecutionPlanBase,
+    SecurityExecutionPlanCreate,
+    SecurityExecutionPlanInDB,
+    SecurityExecutionPlanListResponse,
+    SecurityExecutionProgressResponse,
 )
 from app.services.security_engine.redactor import SENSITIVE_HEADER_NAMES
 from app.services.security_engine.correlation_engine import CorrelationEngine
@@ -198,6 +221,14 @@ from app.services.security_engine.investigation_service import (
     InvestigationServiceError,
     CrossProjectViolationError,
     InvalidFindingStateError,
+)
+from app.services.security_engine.orchestrator import (
+    TestOrchestrator,
+    OrchestrationError,
+    PlanStateError,
+    AuthorizationError as OrchestratorAuthorizationError,
+    EntityNotFoundError as OrchestratorEntityNotFoundError,
+    InvalidSuiteStateError,
 )
 from app.services.ai import (
     AISecurityService,
@@ -5586,6 +5617,424 @@ def get_investigation_context(
     return InvestigationContextResponse(**ctx)
 
 
+# ==============================================================================
+# STAGE 10.1: Security Test Orchestration & Execution Plans Router
+# ==============================================================================
+
+test_suite_router = APIRouter(tags=["Security Test Suites"])
+execution_plan_router = APIRouter(tags=["Security Execution Plans"])
+
+
+def format_suite_response(suite: SecurityTestSuite) -> SecurityTestSuiteInDB:
+    items_in_db = [
+        SecurityTestSuiteItemInDB(
+            id=item.id,
+            suite_id=item.suite_id,
+            security_test_id=item.security_test_id,
+            execution_order=item.execution_order,
+            enabled=item.enabled,
+            created_at=item.created_at,
+            test_type=item.test_type,
+            endpoint=item.endpoint,
+            attacker_identity=item.attacker_identity,
+        )
+        for item in suite.items
+    ]
+    return SecurityTestSuiteInDB(
+        id=suite.id,
+        project_id=suite.project_id,
+        name=suite.name,
+        description=suite.description,
+        status=suite.status,
+        created_at=suite.created_at,
+        updated_at=suite.updated_at,
+        test_count=len(suite.items),
+        items=items_in_db,
+    )
+
+
+def format_plan_response(plan: SecurityExecutionPlan) -> SecurityExecutionPlanInDB:
+    items_in_db = [
+        SecurityExecutionItemInDB(
+            id=item.id,
+            execution_plan_id=item.execution_plan_id,
+            security_test_id=item.security_test_id,
+            execution_order=item.execution_order,
+            status=item.status,
+            test_execution_id=item.test_execution_id,
+            result=item.result,
+            started_at=item.started_at,
+            completed_at=item.completed_at,
+            error_message=item.error_message,
+            test_type=item.test_type,
+            endpoint=item.endpoint,
+            attacker_identity=item.attacker_identity,
+        )
+        for item in plan.items
+    ]
+    return SecurityExecutionPlanInDB(
+        id=plan.id,
+        project_id=plan.project_id,
+        suite_id=plan.suite_id,
+        name=plan.name,
+        status=plan.status,
+        execution_mode=plan.execution_mode,
+        total_tests=plan.total_tests,
+        completed_tests=plan.completed_tests,
+        confirmed_findings=plan.confirmed_findings,
+        inconclusive_tests=plan.inconclusive_tests,
+        failed_tests=plan.failed_tests,
+        created_at=plan.created_at,
+        started_at=plan.started_at,
+        completed_at=plan.completed_at,
+        suite_name=plan.suite_name,
+        items=items_in_db,
+    )
+
+
+def format_plan_progress_response(progress: Dict[str, Any]) -> SecurityExecutionProgressResponse:
+    items_in_db = [
+        SecurityExecutionItemInDB(
+            id=item.id,
+            execution_plan_id=item.execution_plan_id,
+            security_test_id=item.security_test_id,
+            execution_order=item.execution_order,
+            status=item.status,
+            test_execution_id=item.test_execution_id,
+            result=item.result,
+            started_at=item.started_at,
+            completed_at=item.completed_at,
+            error_message=item.error_message,
+            test_type=item.test_type,
+            endpoint=item.endpoint,
+            attacker_identity=item.attacker_identity,
+        )
+        for item in progress["items"]
+    ]
+    return SecurityExecutionProgressResponse(
+        plan_id=progress["plan_id"],
+        project_id=progress["project_id"],
+        name=progress["name"],
+        status=progress["status"],
+        execution_mode=progress["execution_mode"],
+        total_tests=progress["total_tests"],
+        completed_tests=progress["completed_tests"],
+        progress_percent=progress["progress_percent"],
+        results_summary=progress["results_summary"],
+        items=items_in_db,
+        started_at=progress["started_at"],
+        completed_at=progress["completed_at"],
+    )
+
+
+# --- Test Suite Endpoints ---
+
+@test_suite_router.post(
+    "/projects/{project_id}/test-suites",
+    response_model=SecurityTestSuiteInDB,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_test_suite(
+    project_id: int,
+    suite_in: SecurityTestSuiteCreate,
+    db: Session = Depends(get_db),
+):
+    orchestrator = TestOrchestrator(db=db)
+    try:
+        suite = orchestrator.create_suite(
+            project_id=project_id,
+            name=suite_in.name,
+            description=suite_in.description,
+            status=suite_in.status,
+        )
+    except OrchestratorEntityNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return format_suite_response(suite)
+
+
+@test_suite_router.get(
+    "/projects/{project_id}/test-suites",
+    response_model=SecurityTestSuiteListResponse,
+)
+def list_test_suites(
+    project_id: int,
+    db: Session = Depends(get_db),
+):
+    get_project_or_404(project_id, db)
+    orchestrator = TestOrchestrator(db=db)
+    suites = orchestrator.list_suites(project_id)
+    return SecurityTestSuiteListResponse(
+        project_id=project_id,
+        count=len(suites),
+        test_suites=[format_suite_response(s) for s in suites],
+    )
+
+
+@test_suite_router.get(
+    "/test-suites/{suite_id}",
+    response_model=SecurityTestSuiteInDB,
+)
+def get_test_suite(
+    suite_id: str,
+    db: Session = Depends(get_db),
+):
+    orchestrator = TestOrchestrator(db=db)
+    suite = orchestrator.get_suite(suite_id)
+    if not suite:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Test suite with ID {suite_id} not found.",
+        )
+    return format_suite_response(suite)
+
+
+@test_suite_router.patch(
+    "/test-suites/{suite_id}",
+    response_model=SecurityTestSuiteInDB,
+)
+def update_test_suite(
+    suite_id: str,
+    suite_in: SecurityTestSuiteUpdate,
+    db: Session = Depends(get_db),
+):
+    orchestrator = TestOrchestrator(db=db)
+    try:
+        suite = orchestrator.update_suite(
+            suite_id=suite_id,
+            name=suite_in.name,
+            description=suite_in.description,
+            status=suite_in.status,
+        )
+    except OrchestratorEntityNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return format_suite_response(suite)
+
+
+@test_suite_router.delete(
+    "/test-suites/{suite_id}",
+)
+def delete_test_suite(
+    suite_id: str,
+    db: Session = Depends(get_db),
+):
+    orchestrator = TestOrchestrator(db=db)
+    try:
+        orchestrator.delete_suite(suite_id)
+    except OrchestratorEntityNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return {"status": "deleted", "suite_id": suite_id}
+
+
+@test_suite_router.post(
+    "/test-suites/{suite_id}/tests",
+    response_model=SecurityTestSuiteItemInDB,
+    status_code=status.HTTP_201_CREATED,
+)
+def add_test_to_suite(
+    suite_id: str,
+    item_in: SecurityTestSuiteItemCreate,
+    db: Session = Depends(get_db),
+):
+    orchestrator = TestOrchestrator(db=db)
+    try:
+        item = orchestrator.add_test_to_suite(
+            suite_id=suite_id,
+            security_test_id=item_in.security_test_id,
+            execution_order=item_in.execution_order,
+            enabled=item_in.enabled,
+        )
+    except OrchestratorEntityNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except CrossProjectViolationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return SecurityTestSuiteItemInDB(
+        id=item.id,
+        suite_id=item.suite_id,
+        security_test_id=item.security_test_id,
+        execution_order=item.execution_order,
+        enabled=item.enabled,
+        created_at=item.created_at,
+        test_type=item.test_type,
+        endpoint=item.endpoint,
+        attacker_identity=item.attacker_identity,
+    )
+
+
+@test_suite_router.patch(
+    "/test-suites/{suite_id}/tests/{item_id}",
+    response_model=SecurityTestSuiteItemInDB,
+)
+def update_suite_item(
+    suite_id: str,
+    item_id: str,
+    item_in: SecurityTestSuiteItemUpdate,
+    db: Session = Depends(get_db),
+):
+    orchestrator = TestOrchestrator(db=db)
+    try:
+        item = orchestrator.update_suite_item(
+            suite_id=suite_id,
+            item_id=item_id,
+            execution_order=item_in.execution_order,
+            enabled=item_in.enabled,
+        )
+    except OrchestratorEntityNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return SecurityTestSuiteItemInDB(
+        id=item.id,
+        suite_id=item.suite_id,
+        security_test_id=item.security_test_id,
+        execution_order=item.execution_order,
+        enabled=item.enabled,
+        created_at=item.created_at,
+        test_type=item.test_type,
+        endpoint=item.endpoint,
+        attacker_identity=item.attacker_identity,
+    )
+
+
+@test_suite_router.delete(
+    "/test-suites/{suite_id}/tests/{item_id}",
+)
+def remove_test_from_suite(
+    suite_id: str,
+    item_id: str,
+    db: Session = Depends(get_db),
+):
+    orchestrator = TestOrchestrator(db=db)
+    try:
+        orchestrator.remove_test_from_suite(suite_id, item_id)
+    except OrchestratorEntityNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return {"status": "deleted", "item_id": item_id}
+
+
+# --- Execution Plan Endpoints ---
+
+@execution_plan_router.post(
+    "/projects/{project_id}/execution-plans",
+    response_model=SecurityExecutionPlanInDB,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_execution_plan(
+    project_id: int,
+    plan_in: SecurityExecutionPlanCreate,
+    db: Session = Depends(get_db),
+):
+    get_project_or_404(project_id, db)
+    orchestrator = TestOrchestrator(db=db)
+    try:
+        if plan_in.suite_id:
+            plan = orchestrator.create_plan_from_suite(
+                project_id=project_id,
+                suite_id=plan_in.suite_id,
+                name=plan_in.name,
+                execution_mode=plan_in.execution_mode,
+            )
+        elif plan_in.security_test_ids:
+            plan = orchestrator.create_plan_from_tests(
+                project_id=project_id,
+                security_test_ids=plan_in.security_test_ids,
+                name=plan_in.name,
+                execution_mode=plan_in.execution_mode,
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Either 'suite_id' or 'security_test_ids' must be provided.",
+            )
+    except (OrchestratorEntityNotFoundError, InvalidSuiteStateError, CrossProjectViolationError) as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    return format_plan_response(plan)
+
+
+@execution_plan_router.get(
+    "/projects/{project_id}/execution-plans",
+    response_model=SecurityExecutionPlanListResponse,
+)
+def list_execution_plans(
+    project_id: int,
+    db: Session = Depends(get_db),
+):
+    get_project_or_404(project_id, db)
+    orchestrator = TestOrchestrator(db=db)
+    plans = orchestrator.list_plans(project_id)
+    return SecurityExecutionPlanListResponse(
+        project_id=project_id,
+        count=len(plans),
+        execution_plans=[format_plan_response(p) for p in plans],
+    )
+
+
+@execution_plan_router.get(
+    "/execution-plans/{plan_id}",
+    response_model=SecurityExecutionPlanInDB,
+)
+def get_execution_plan(
+    plan_id: str,
+    db: Session = Depends(get_db),
+):
+    orchestrator = TestOrchestrator(db=db)
+    plan = orchestrator.get_plan(plan_id)
+    if not plan:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Execution plan with ID {plan_id} not found.",
+        )
+    return format_plan_response(plan)
+
+
+@execution_plan_router.post(
+    "/execution-plans/{plan_id}/start",
+    response_model=SecurityExecutionPlanInDB,
+)
+async def start_execution_plan(
+    plan_id: str,
+    db: Session = Depends(get_db),
+):
+    orchestrator = TestOrchestrator(db=db)
+    try:
+        plan = await orchestrator.start_plan(plan_id)
+    except OrchestratorEntityNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except (PlanStateError, OrchestratorAuthorizationError) as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return format_plan_response(plan)
+
+
+@execution_plan_router.post(
+    "/execution-plans/{plan_id}/cancel",
+    response_model=SecurityExecutionPlanInDB,
+)
+def cancel_execution_plan(
+    plan_id: str,
+    db: Session = Depends(get_db),
+):
+    orchestrator = TestOrchestrator(db=db)
+    try:
+        plan = orchestrator.cancel_plan(plan_id)
+    except OrchestratorEntityNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return format_plan_response(plan)
+
+
+@execution_plan_router.get(
+    "/execution-plans/{plan_id}/progress",
+    response_model=SecurityExecutionProgressResponse,
+)
+def get_execution_plan_progress(
+    plan_id: str,
+    db: Session = Depends(get_db),
+):
+    orchestrator = TestOrchestrator(db=db)
+    try:
+        progress = orchestrator.get_plan_progress(plan_id)
+    except OrchestratorEntityNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return format_plan_progress_response(progress)
+
+
 # Include sub-routers into main router
 router.include_router(project_router)
 router.include_router(api_router)
@@ -5608,3 +6057,5 @@ router.include_router(attack_path_router)
 router.include_router(impact_router)
 router.include_router(ai_router)
 router.include_router(investigation_router)
+router.include_router(test_suite_router)
+router.include_router(execution_plan_router)

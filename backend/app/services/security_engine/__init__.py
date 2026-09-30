@@ -22,6 +22,16 @@ from app.services.security_engine.investigation_service import (
     InvalidFindingStateError,
 )
 
+from app.services.security_engine.redactor import redact_headers, redact_text
+from app.services.security_engine.orchestrator import (
+    TestOrchestrator,
+    OrchestrationError,
+    PlanStateError,
+    AuthorizationError,
+    EntityNotFoundError,
+    InvalidSuiteStateError,
+)
+
 __all__ = [
     "AsyncSecurityHttpClient",
     "ExecutionResult",
@@ -40,6 +50,12 @@ __all__ = [
     "InvestigationServiceError",
     "CrossProjectViolationError",
     "InvalidFindingStateError",
+    "TestOrchestrator",
+    "OrchestrationError",
+    "PlanStateError",
+    "AuthorizationError",
+    "EntityNotFoundError",
+    "InvalidSuiteStateError",
     "redact_headers",
     "redact_text",
 ]

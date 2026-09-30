@@ -54,6 +54,8 @@ class Project(Base):
     ai_analyses = relationship("AIAnalysis", back_populates="project", cascade="all, delete-orphan")
     ai_hypotheses = relationship("AIHypothesis", back_populates="project", cascade="all, delete-orphan")
     investigations = relationship("SecurityInvestigation", back_populates="project", cascade="all, delete-orphan")
+    test_suites = relationship("SecurityTestSuite", back_populates="project", cascade="all, delete-orphan")
+    execution_plans = relationship("SecurityExecutionPlan", back_populates="project", cascade="all, delete-orphan")
 
 
 class API(Base):
@@ -1142,6 +1144,155 @@ class InvestigationItem(Base):
     )
 
 
+# ==============================================================================
+# STAGE 10.1: Security Test Orchestration & Execution Plans Models
+# ==============================================================================
+
+class SecurityTestSuite(Base):
+    __tablename__ = "security_test_suites"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(200), nullable=False, index=True)
+    description = Column(Text, nullable=True)
+    status = Column(String(50), nullable=False, default="ACTIVE", index=True)  # ACTIVE, DISABLED
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    project = relationship("Project", back_populates="test_suites")
+    items = relationship(
+        "SecurityTestSuiteItem",
+        back_populates="suite",
+        cascade="all, delete-orphan",
+        order_by="SecurityTestSuiteItem.execution_order",
+    )
+    execution_plans = relationship("SecurityExecutionPlan", back_populates="suite")
+
+    @property
+    def test_count(self) -> int:
+        return len(self.items) if self.items else 0
+
+    __table_args__ = (
+        Index("ix_test_suites_project_status", "project_id", "status"),
+    )
+
+
+class SecurityTestSuiteItem(Base):
+    __tablename__ = "security_test_suite_items"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    suite_id = Column(String(36), ForeignKey("security_test_suites.id", ondelete="CASCADE"), nullable=False, index=True)
+    security_test_id = Column(String(36), ForeignKey("security_tests.id", ondelete="CASCADE"), nullable=False, index=True)
+    execution_order = Column(Integer, nullable=False)
+    enabled = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    suite = relationship("SecurityTestSuite", back_populates="items")
+    security_test = relationship("SecurityTest")
+
+    @property
+    def test_type(self) -> Optional[str]:
+        return self.security_test.test_type if self.security_test else None
+
+    @property
+    def endpoint(self) -> Optional[str]:
+        if self.security_test and self.security_test.endpoint:
+            return self.security_test.endpoint.path
+        return None
+
+    @property
+    def attacker_identity(self) -> Optional[str]:
+        if self.security_test and self.security_test.attacker_identity:
+            return self.security_test.attacker_identity.name
+        return None
+
+    __table_args__ = (
+        UniqueConstraint("suite_id", "security_test_id", name="uq_test_suite_item_test"),
+        UniqueConstraint("suite_id", "execution_order", name="uq_test_suite_item_order"),
+        Index("ix_test_suite_items_suite_order", "suite_id", "execution_order"),
+    )
+
+
+class SecurityExecutionPlan(Base):
+    __tablename__ = "security_execution_plans"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    suite_id = Column(String(36), ForeignKey("security_test_suites.id", ondelete="SET NULL"), nullable=True, index=True)
+    name = Column(String(200), nullable=False, index=True)
+    status = Column(String(50), nullable=False, default="DRAFT", index=True)  # DRAFT, READY, RUNNING, COMPLETED, FAILED, CANCELLED
+    execution_mode = Column(String(50), nullable=False, default="SEQUENTIAL", index=True)  # SEQUENTIAL, FAIL_FAST, CONTINUE_ON_FAILURE
+    total_tests = Column(Integer, nullable=False, default=0)
+    completed_tests = Column(Integer, nullable=False, default=0)
+    confirmed_findings = Column(Integer, nullable=False, default=0)
+    inconclusive_tests = Column(Integer, nullable=False, default=0)
+    failed_tests = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    project = relationship("Project", back_populates="execution_plans")
+    suite = relationship("SecurityTestSuite", back_populates="execution_plans")
+    items = relationship(
+        "SecurityExecutionItem",
+        back_populates="execution_plan",
+        cascade="all, delete-orphan",
+        order_by="SecurityExecutionItem.execution_order",
+    )
+
+    @property
+    def suite_name(self) -> Optional[str]:
+        return self.suite.name if self.suite else None
+
+    __table_args__ = (
+        Index("ix_execution_plans_project_status", "project_id", "status"),
+        Index("ix_execution_plans_suite_id", "suite_id"),
+    )
+
+
+class SecurityExecutionItem(Base):
+    __tablename__ = "security_execution_items"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    execution_plan_id = Column(String(36), ForeignKey("security_execution_plans.id", ondelete="CASCADE"), nullable=False, index=True)
+    security_test_id = Column(String(36), ForeignKey("security_tests.id", ondelete="CASCADE"), nullable=False, index=True)
+    execution_order = Column(Integer, nullable=False)
+    status = Column(String(50), nullable=False, default="QUEUED", index=True)  # QUEUED, RUNNING, COMPLETED, FAILED, SKIPPED, CANCELLED
+    test_execution_id = Column(String(36), ForeignKey("test_executions.id", ondelete="SET NULL"), nullable=True, index=True)
+    result = Column(String(50), nullable=True, index=True)  # PASS, CONFIRMED, INCONCLUSIVE, ERROR
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    error_message = Column(Text, nullable=True)
+
+    execution_plan = relationship("SecurityExecutionPlan", back_populates="items")
+    security_test = relationship("SecurityTest")
+    test_execution = relationship("TestExecution")
+
+    @property
+    def test_type(self) -> Optional[str]:
+        return self.security_test.test_type if self.security_test else None
+
+    @property
+    def endpoint(self) -> Optional[str]:
+        if self.security_test and self.security_test.endpoint:
+            return self.security_test.endpoint.path
+        return None
+
+    @property
+    def attacker_identity(self) -> Optional[str]:
+        if self.security_test and self.security_test.attacker_identity:
+            return self.security_test.attacker_identity.name
+        return None
+
+    __table_args__ = (
+        UniqueConstraint("execution_plan_id", "security_test_id", name="uq_execution_item_test"),
+        UniqueConstraint("execution_plan_id", "execution_order", name="uq_execution_item_order"),
+        Index("ix_execution_items_plan_order", "execution_plan_id", "execution_order"),
+    )
+
+
 # Prevent pytest from treating model classes as test case classes
 AttackGraph.__test__ = False
 AttackGraphNode.__test__ = False
@@ -1157,3 +1308,7 @@ SecurityInvestigation.__test__ = False
 InvestigationItem.__test__ = False
 SecurityTest.__test__ = False
 TestExecution.__test__ = False
+SecurityTestSuite.__test__ = False
+SecurityTestSuiteItem.__test__ = False
+SecurityExecutionPlan.__test__ = False
+SecurityExecutionItem.__test__ = False

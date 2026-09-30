@@ -1469,3 +1469,165 @@ class InvestigationContextResponse(BaseModel):
     security_tests: List[Dict[str, Any]] = []
     workflow_executions: List[Dict[str, Any]] = []
     summary_counts: Dict[str, int] = {}
+
+
+# ==============================================================================
+# STAGE 10.1: Security Test Orchestration & Execution Plans Schemas
+# ==============================================================================
+
+class TestSuiteStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    DISABLED = "DISABLED"
+
+
+class ExecutionPlanStatus(str, Enum):
+    DRAFT = "DRAFT"
+    READY = "READY"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class ExecutionMode(str, Enum):
+    SEQUENTIAL = "SEQUENTIAL"
+    FAIL_FAST = "FAIL_FAST"
+    CONTINUE_ON_FAILURE = "CONTINUE_ON_FAILURE"
+
+
+class ExecutionItemStatus(str, Enum):
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    SKIPPED = "SKIPPED"
+    CANCELLED = "CANCELLED"
+
+
+class SecurityTestSuiteItemBase(BaseModel):
+    security_test_id: str
+    execution_order: Optional[int] = None
+    enabled: bool = True
+
+
+class SecurityTestSuiteItemCreate(SecurityTestSuiteItemBase):
+    pass
+
+
+class SecurityTestSuiteItemUpdate(BaseModel):
+    execution_order: Optional[int] = None
+    enabled: Optional[bool] = None
+
+
+class SecurityTestSuiteItemInDB(BaseModel):
+    id: str
+    suite_id: str
+    security_test_id: str
+    execution_order: int
+    enabled: bool
+    created_at: datetime
+    test_type: Optional[str] = None
+    endpoint: Optional[str] = None
+    attacker_identity: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SecurityTestSuiteBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = None
+    status: str = "ACTIVE"
+
+
+class SecurityTestSuiteCreate(SecurityTestSuiteBase):
+    pass
+
+
+class SecurityTestSuiteUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[str] = None
+    status: Optional[str] = None
+
+
+class SecurityTestSuiteInDB(SecurityTestSuiteBase):
+    id: str
+    project_id: int
+    created_at: datetime
+    updated_at: datetime
+    test_count: int = 0
+    items: List[SecurityTestSuiteItemInDB] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SecurityTestSuiteListResponse(BaseModel):
+    project_id: int
+    count: int
+    test_suites: List[SecurityTestSuiteInDB] = []
+
+
+class SecurityExecutionItemInDB(BaseModel):
+    id: str
+    execution_plan_id: str
+    security_test_id: str
+    execution_order: int
+    status: str
+    test_execution_id: Optional[str] = None
+    result: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    error_message: Optional[str] = None
+    test_type: Optional[str] = None
+    endpoint: Optional[str] = None
+    attacker_identity: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SecurityExecutionPlanBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    suite_id: Optional[str] = None
+    execution_mode: str = "SEQUENTIAL"
+
+
+class SecurityExecutionPlanCreate(SecurityExecutionPlanBase):
+    security_test_ids: Optional[List[str]] = None
+
+
+class SecurityExecutionPlanInDB(SecurityExecutionPlanBase):
+    id: str
+    project_id: int
+    status: str
+    total_tests: int = 0
+    completed_tests: int = 0
+    confirmed_findings: int = 0
+    inconclusive_tests: int = 0
+    failed_tests: int = 0
+    created_at: datetime
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    suite_name: Optional[str] = None
+    items: List[SecurityExecutionItemInDB] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SecurityExecutionPlanListResponse(BaseModel):
+    project_id: int
+    count: int
+    execution_plans: List[SecurityExecutionPlanInDB] = []
+
+
+class SecurityExecutionProgressResponse(BaseModel):
+    plan_id: str
+    project_id: int
+    name: str
+    status: str
+    execution_mode: str
+    total_tests: int
+    completed_tests: int
+    progress_percent: float
+    results_summary: Dict[str, int] = {}
+    items: List[SecurityExecutionItemInDB] = []
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
