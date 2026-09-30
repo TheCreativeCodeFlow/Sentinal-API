@@ -56,6 +56,8 @@ from app.models import (
     SecurityGateEvaluationItem,
     SecurityReport,
     SecurityReportSnapshot,
+    SecurityScanSchedule,
+    SecurityScheduledExecution,
 )
 from app.schemas import (
     ProjectCreate,
@@ -253,6 +255,13 @@ from app.schemas import (
     SecurityReportSnapshotInDB,
     SecurityReportManifest,
     SecurityReportDetailResponse,
+    SecurityScanScheduleCreate,
+    SecurityScanScheduleUpdate,
+    SecurityScanScheduleInDB,
+    SecurityScanScheduleListResponse,
+    SchedulePreviewResponse,
+    SecurityScheduledExecutionInDB,
+    SecurityScheduledExecutionListResponse,
 )
 from app.services.security_engine.redactor import SENSITIVE_HEADER_NAMES
 from app.services.security_engine.correlation_engine import CorrelationEngine
@@ -304,6 +313,21 @@ from app.services.security_engine.report_service import (
     DuplicateReportError,
     InvalidReportSourceError,
     ArchivedReportError,
+)
+from app.services.security_engine.schedule_service import (
+    ScheduleService,
+    ScheduleError,
+    ScheduleNotFoundError,
+    DuplicateScheduleError,
+    InvalidScheduleError,
+    DisabledScheduleError,
+)
+from app.services.security_engine.scheduled_scan_service import (
+    ScheduledScanService,
+    ScheduledScanError,
+)
+from app.services.security_engine.scheduler import (
+    SchedulerRunner,
 )
 from app.services.ai import (
     AISecurityService,
@@ -7185,6 +7209,344 @@ def get_security_report_evidence_package(
     return package
 
 
+# ==============================================================================
+# STAGE 10.6: Scheduled & Continuous Security Scanning Router
+# ==============================================================================
+
+scan_schedule_router = APIRouter(tags=["Security Scan Schedules"])
+
+
+def format_schedule_response(schedule: SecurityScanSchedule) -> SecurityScanScheduleInDB:
+    p_name = schedule.scan_profile.name if schedule.scan_profile else None
+    g_name = schedule.security_gate.name if schedule.security_gate else None
+    return SecurityScanScheduleInDB(
+        id=schedule.id,
+        project_id=schedule.project_id,
+        name=schedule.name,
+        description=schedule.description,
+        status=schedule.status,
+        scan_profile_id=schedule.scan_profile_id,
+        security_gate_id=schedule.security_gate_id,
+        timezone=schedule.timezone,
+        schedule_type=schedule.schedule_type,
+        cron_expression=schedule.cron_expression,
+        scheduled_at=schedule.scheduled_at,
+        start_at=schedule.start_at,
+        end_at=schedule.end_at,
+        max_concurrent_runs=schedule.max_concurrent_runs,
+        timeout_seconds=schedule.timeout_seconds,
+        created_at=schedule.created_at or datetime.now(timezone.utc),
+        updated_at=schedule.updated_at or datetime.now(timezone.utc),
+        last_run_at=schedule.last_run_at,
+        next_run_at=schedule.next_run_at,
+        scan_profile_name=p_name,
+        gate_name=g_name,
+    )
+
+
+def format_scheduled_execution_response(exec_rec: SecurityScheduledExecution) -> SecurityScheduledExecutionInDB:
+    s_name = exec_rec.schedule.name if exec_rec.schedule else None
+    p_name = exec_rec.execution_plan.name if exec_rec.execution_plan else None
+    verdict = exec_rec.gate_evaluation.verdict if exec_rec.gate_evaluation else None
+    return SecurityScheduledExecutionInDB(
+        id=exec_rec.id,
+        schedule_id=exec_rec.schedule_id,
+        project_id=exec_rec.project_id,
+        execution_plan_id=exec_rec.execution_plan_id,
+        status=exec_rec.status,
+        trigger_type=exec_rec.trigger_type,
+        scheduled_for=exec_rec.scheduled_for,
+        started_at=exec_rec.started_at,
+        completed_at=exec_rec.completed_at,
+        baseline_comparison_id=exec_rec.baseline_comparison_id,
+        gate_evaluation_id=exec_rec.gate_evaluation_id,
+        report_id=exec_rec.report_id,
+        error_message=exec_rec.error_message,
+        created_at=exec_rec.created_at or datetime.now(timezone.utc),
+        schedule_name=s_name,
+        execution_plan_name=p_name,
+        gate_verdict=verdict,
+    )
+
+
+@scan_schedule_router.post(
+    "/projects/{project_id}/security-scan-schedules",
+    response_model=SecurityScanScheduleInDB,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_security_scan_schedule(
+    project_id: int,
+    schedule_in: SecurityScanScheduleCreate,
+    db: Session = Depends(get_db),
+):
+    service = ScheduleService(db=db)
+    try:
+        schedule = service.create_schedule(
+            project_id=project_id,
+            name=schedule_in.name,
+            scan_profile_id=schedule_in.scan_profile_id,
+            description=schedule_in.description,
+            security_gate_id=schedule_in.security_gate_id,
+            timezone_name=schedule_in.timezone,
+            schedule_type=schedule_in.schedule_type,
+            cron_expression=schedule_in.cron_expression,
+            scheduled_at=schedule_in.scheduled_at,
+            start_at=schedule_in.start_at,
+            end_at=schedule_in.end_at,
+            max_concurrent_runs=schedule_in.max_concurrent_runs,
+            timeout_seconds=schedule_in.timeout_seconds,
+            status=schedule_in.status,
+        )
+    except ScheduleNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except DuplicateScheduleError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except (InvalidScheduleError, CrossProjectViolationError, ScheduleError) as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return format_schedule_response(schedule)
+
+
+@scan_schedule_router.get(
+    "/projects/{project_id}/security-scan-schedules",
+    response_model=SecurityScanScheduleListResponse,
+)
+def list_security_scan_schedules(
+    project_id: int,
+    status: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    service = ScheduleService(db=db)
+    schedules = service.list_schedules(project_id=project_id, status=status)
+    return SecurityScanScheduleListResponse(
+        project_id=project_id,
+        count=len(schedules),
+        schedules=[format_schedule_response(s) for s in schedules],
+    )
+
+
+@scan_schedule_router.get(
+    "/security-scan-schedules/{schedule_id}",
+    response_model=SecurityScanScheduleInDB,
+)
+def get_security_scan_schedule(
+    schedule_id: str,
+    db: Session = Depends(get_db),
+):
+    service = ScheduleService(db=db)
+    schedule = service.get_schedule(schedule_id=schedule_id)
+    if not schedule:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Security scan schedule '{schedule_id}' not found.",
+        )
+    return format_schedule_response(schedule)
+
+
+@scan_schedule_router.patch(
+    "/security-scan-schedules/{schedule_id}",
+    response_model=SecurityScanScheduleInDB,
+)
+def patch_security_scan_schedule(
+    schedule_id: str,
+    schedule_in: SecurityScanScheduleUpdate,
+    db: Session = Depends(get_db),
+):
+    service = ScheduleService(db=db)
+    try:
+        schedule = service.update_schedule(
+            schedule_id=schedule_id,
+            name=schedule_in.name,
+            description=schedule_in.description,
+            scan_profile_id=schedule_in.scan_profile_id,
+            security_gate_id=schedule_in.security_gate_id,
+            timezone_name=schedule_in.timezone,
+            schedule_type=schedule_in.schedule_type,
+            cron_expression=schedule_in.cron_expression,
+            scheduled_at=schedule_in.scheduled_at,
+            start_at=schedule_in.start_at,
+            end_at=schedule_in.end_at,
+            max_concurrent_runs=schedule_in.max_concurrent_runs,
+            timeout_seconds=schedule_in.timeout_seconds,
+            status=schedule_in.status,
+        )
+    except ScheduleNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except DuplicateScheduleError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except (InvalidScheduleError, CrossProjectViolationError, ScheduleError) as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return format_schedule_response(schedule)
+
+
+@scan_schedule_router.put(
+    "/security-scan-schedules/{schedule_id}",
+    response_model=SecurityScanScheduleInDB,
+)
+def put_security_scan_schedule(
+    schedule_id: str,
+    schedule_in: SecurityScanScheduleUpdate,
+    db: Session = Depends(get_db),
+):
+    return patch_security_scan_schedule(schedule_id=schedule_id, schedule_in=schedule_in, db=db)
+
+
+@scan_schedule_router.delete(
+    "/security-scan-schedules/{schedule_id}",
+    status_code=status.HTTP_200_OK,
+)
+def delete_security_scan_schedule(
+    schedule_id: str,
+    db: Session = Depends(get_db),
+):
+    service = ScheduleService(db=db)
+    try:
+        service.delete_schedule(schedule_id=schedule_id)
+    except ScheduleNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return {"message": "Security scan schedule deleted successfully"}
+
+
+@scan_schedule_router.post(
+    "/security-scan-schedules/{schedule_id}/run",
+    response_model=SecurityScheduledExecutionInDB,
+    status_code=status.HTTP_200_OK,
+)
+async def run_security_scan_schedule(
+    schedule_id: str,
+    db: Session = Depends(get_db),
+):
+    service = ScheduledScanService(db=db)
+    try:
+        exec_record = await service.trigger_execution(
+            schedule_id=schedule_id,
+            trigger_type="MANUAL",
+        )
+    except ScheduleNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except (ScheduledScanError, CrossProjectViolationError, ScheduleError) as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return format_scheduled_execution_response(exec_record)
+
+
+@scan_schedule_router.post(
+    "/security-scan-schedules/{schedule_id}/enable",
+    response_model=SecurityScanScheduleInDB,
+)
+def enable_security_scan_schedule(
+    schedule_id: str,
+    db: Session = Depends(get_db),
+):
+    service = ScheduleService(db=db)
+    try:
+        schedule = service.enable_schedule(schedule_id=schedule_id)
+    except ScheduleNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except (InvalidScheduleError, CrossProjectViolationError, ScheduleError) as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return format_schedule_response(schedule)
+
+
+@scan_schedule_router.post(
+    "/security-scan-schedules/{schedule_id}/disable",
+    response_model=SecurityScanScheduleInDB,
+)
+def disable_security_scan_schedule(
+    schedule_id: str,
+    db: Session = Depends(get_db),
+):
+    service = ScheduleService(db=db)
+    try:
+        schedule = service.disable_schedule(schedule_id=schedule_id)
+    except ScheduleNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except (InvalidScheduleError, CrossProjectViolationError, ScheduleError) as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return format_schedule_response(schedule)
+
+
+@scan_schedule_router.get(
+    "/security-scan-schedules/{schedule_id}/preview",
+    response_model=SchedulePreviewResponse,
+)
+def preview_security_scan_schedule(
+    schedule_id: str,
+    count: int = 5,
+    db: Session = Depends(get_db),
+):
+    service = ScheduleService(db=db)
+    try:
+        preview = service.get_schedule_preview(schedule_id=schedule_id, count=count)
+    except ScheduleNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except (InvalidScheduleError, ScheduleError) as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return SchedulePreviewResponse(**preview)
+
+
+@scan_schedule_router.get(
+    "/security-scan-schedules/{schedule_id}/executions",
+    response_model=SecurityScheduledExecutionListResponse,
+)
+def list_schedule_executions(
+    schedule_id: str,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    scan_service = ScheduledScanService(db=db)
+    schedule_service = ScheduleService(db=db)
+    schedule = schedule_service.get_schedule(schedule_id=schedule_id)
+    if not schedule:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Security scan schedule '{schedule_id}' not found.",
+        )
+    executions = scan_service.list_executions_for_schedule(schedule_id=schedule_id, limit=limit)
+    return SecurityScheduledExecutionListResponse(
+        project_id=schedule.project_id,
+        count=len(executions),
+        executions=[format_scheduled_execution_response(e) for e in executions],
+    )
+
+
+@scan_schedule_router.get(
+    "/security-scheduled-executions/{execution_id}",
+    response_model=SecurityScheduledExecutionInDB,
+)
+def get_security_scheduled_execution(
+    execution_id: str,
+    db: Session = Depends(get_db),
+):
+    scan_service = ScheduledScanService(db=db)
+    execution = scan_service.get_execution(execution_id=execution_id)
+    if not execution:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scheduled execution with ID '{execution_id}' not found.",
+        )
+    return format_scheduled_execution_response(execution)
+
+
+@scan_schedule_router.get(
+    "/projects/{project_id}/security-scheduled-executions",
+    response_model=SecurityScheduledExecutionListResponse,
+)
+def list_project_scheduled_executions(
+    project_id: int,
+    status: Optional[str] = None,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    scan_service = ScheduledScanService(db=db)
+    executions = scan_service.list_executions_for_project(
+        project_id=project_id, status=status, limit=limit
+    )
+    return SecurityScheduledExecutionListResponse(
+        project_id=project_id,
+        count=len(executions),
+        executions=[format_scheduled_execution_response(e) for e in executions],
+    )
+
+
 # Include sub-routers into main router
 router.include_router(project_router)
 router.include_router(api_router)
@@ -7214,3 +7576,4 @@ router.include_router(baseline_router)
 router.include_router(baseline_comparison_router)
 router.include_router(security_gate_router)
 router.include_router(security_report_router)
+router.include_router(scan_schedule_router)

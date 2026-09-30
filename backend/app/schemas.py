@@ -2096,3 +2096,129 @@ class SecurityReportDetailResponse(BaseModel):
     report: SecurityReportInDB
     latest_snapshot: Optional[SecurityReportSnapshotInDB] = None
     manifest: Optional[SecurityReportManifest] = None
+
+
+# ==============================================================================
+# STAGE 10.6: Scheduled & Continuous Security Scanning Schemas
+# ==============================================================================
+
+class ScheduleStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    DISABLED = "DISABLED"
+    EXPIRED = "EXPIRED"
+
+
+class ScheduleType(str, Enum):
+    ONCE = "ONCE"
+    HOURLY = "HOURLY"
+    DAILY = "DAILY"
+    WEEKLY = "WEEKLY"
+    CRON = "CRON"
+
+
+class ScheduledExecutionStatus(str, Enum):
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+    SKIPPED = "SKIPPED"
+
+
+class TriggerType(str, Enum):
+    SCHEDULED = "SCHEDULED"
+    MANUAL = "MANUAL"
+    RETRY = "RETRY"
+
+
+class SecurityScanScheduleBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = None
+    scan_profile_id: str = Field(..., min_length=1, max_length=36)
+    security_gate_id: Optional[str] = None
+    timezone: str = Field("UTC", min_length=1, max_length=100)
+    schedule_type: str = Field("DAILY", min_length=1, max_length=50)
+    cron_expression: Optional[str] = Field(None, max_length=100)
+    scheduled_at: Optional[datetime] = None
+    start_at: Optional[datetime] = None
+    end_at: Optional[datetime] = None
+    max_concurrent_runs: int = Field(1, ge=1, le=10)
+    timeout_seconds: int = Field(600, ge=30, le=86400)
+    status: str = Field("ACTIVE", min_length=1, max_length=50)
+
+
+class SecurityScanScheduleCreate(SecurityScanScheduleBase):
+    project_id: Optional[int] = None
+
+
+class SecurityScanScheduleUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[str] = None
+    scan_profile_id: Optional[str] = None
+    security_gate_id: Optional[str] = None
+    timezone: Optional[str] = None
+    schedule_type: Optional[str] = None
+    cron_expression: Optional[str] = None
+    scheduled_at: Optional[datetime] = None
+    start_at: Optional[datetime] = None
+    end_at: Optional[datetime] = None
+    max_concurrent_runs: Optional[int] = Field(None, ge=1, le=10)
+    timeout_seconds: Optional[int] = Field(None, ge=30, le=86400)
+    status: Optional[str] = None
+
+
+class SecurityScanScheduleInDB(SecurityScanScheduleBase):
+    id: str
+    project_id: int
+    created_at: datetime
+    updated_at: datetime
+    last_run_at: Optional[datetime] = None
+    next_run_at: Optional[datetime] = None
+    scan_profile_name: Optional[str] = None
+    gate_name: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SecurityScanScheduleListResponse(BaseModel):
+    project_id: int
+    count: int
+    schedules: List[SecurityScanScheduleInDB] = []
+
+
+class SchedulePreviewResponse(BaseModel):
+    schedule_id: Optional[str] = None
+    name: Optional[str] = None
+    schedule_type: str
+    timezone: str
+    is_active: bool
+    is_expired: bool
+    next_occurrences: List[datetime] = []
+
+
+class SecurityScheduledExecutionInDB(BaseModel):
+    id: str
+    schedule_id: Optional[str] = None
+    project_id: int
+    execution_plan_id: Optional[str] = None
+    status: str
+    trigger_type: str
+    scheduled_for: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    baseline_comparison_id: Optional[str] = None
+    gate_evaluation_id: Optional[str] = None
+    report_id: Optional[str] = None
+    error_message: Optional[str] = None
+    created_at: datetime
+    schedule_name: Optional[str] = None
+    execution_plan_name: Optional[str] = None
+    gate_verdict: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SecurityScheduledExecutionListResponse(BaseModel):
+    project_id: int
+    count: int
+    executions: List[SecurityScheduledExecutionInDB] = []

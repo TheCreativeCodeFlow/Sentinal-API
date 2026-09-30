@@ -301,3 +301,63 @@ class SentinelClient:
         """Retrieve full structured evidence package."""
         params = {"version": version} if version else None
         return self._request("GET", f"/api/v1/security-reports/{report_id}/package", params=params)
+
+    # =========================================================================
+    # Scheduled & Continuous Security Scanning
+    # =========================================================================
+
+    def list_schedules(self, project_id: int, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List scan schedules for a project."""
+        params = {"status": status} if status else None
+        data = self._request("GET", f"/api/v1/projects/{project_id}/security-scan-schedules", params=params)
+        if isinstance(data, dict) and "schedules" in data:
+            return data["schedules"]
+        return data or []
+
+    def get_schedule(self, schedule_id: str) -> Dict[str, Any]:
+        """Retrieve details of a security scan schedule."""
+        return self._request("GET", f"/api/v1/security-scan-schedules/{schedule_id}")
+
+    def preview_schedule(self, schedule_id: str, count: int = 5) -> Dict[str, Any]:
+        """Preview next occurrences for a security scan schedule."""
+        params = {"count": count}
+        return self._request("GET", f"/api/v1/security-scan-schedules/{schedule_id}/preview", params=params)
+
+    def run_schedule(self, schedule_id: str) -> Dict[str, Any]:
+        """Trigger an immediate manual run of a security scan schedule."""
+        return self._request("POST", f"/api/v1/security-scan-schedules/{schedule_id}/run")
+
+    def enable_schedule(self, schedule_id: str) -> Dict[str, Any]:
+        """Enable an inactive security scan schedule."""
+        return self._request("POST", f"/api/v1/security-scan-schedules/{schedule_id}/enable")
+
+    def disable_schedule(self, schedule_id: str) -> Dict[str, Any]:
+        """Disable an active security scan schedule."""
+        return self._request("POST", f"/api/v1/security-scan-schedules/{schedule_id}/disable")
+
+    def list_scheduled_executions(
+        self,
+        schedule_id: Optional[str] = None,
+        project_id: Optional[int] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """List historical scheduled executions for a schedule or project."""
+        if schedule_id:
+            data = self._request("GET", f"/api/v1/security-scan-schedules/{schedule_id}/executions", params={"limit": limit})
+        elif project_id:
+            params = {"limit": limit}
+            if status:
+                params["status"] = status
+            data = self._request("GET", f"/api/v1/projects/{project_id}/security-scheduled-executions", params=params)
+        else:
+            return []
+
+        if isinstance(data, dict) and "executions" in data:
+            return data["executions"]
+        return data or []
+
+    def get_scheduled_execution(self, execution_id: str) -> Dict[str, Any]:
+        """Retrieve details of a scheduled execution."""
+        return self._request("GET", f"/api/v1/security-scheduled-executions/{execution_id}")
+

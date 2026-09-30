@@ -60,6 +60,8 @@ class Project(Base):
     baselines = relationship("SecurityBaseline", back_populates="project", cascade="all, delete-orphan")
     security_gates = relationship("SecurityGate", back_populates="project", cascade="all, delete-orphan")
     security_reports = relationship("SecurityReport", back_populates="project", cascade="all, delete-orphan")
+    security_scan_schedules = relationship("SecurityScanSchedule", back_populates="project", cascade="all, delete-orphan")
+    scheduled_executions = relationship("SecurityScheduledExecution", back_populates="project", cascade="all, delete-orphan")
 
 
 class API(Base):
@@ -1591,6 +1593,82 @@ class SecurityReportSnapshot(Base):
     )
 
 
+# ==============================================================================
+# STAGE 10.6: Scheduled & Continuous Security Scanning Models
+# ==============================================================================
+
+class SecurityScanSchedule(Base):
+    __tablename__ = "security_scan_schedules"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    description = Column(Text, nullable=True)
+    status = Column(String(50), nullable=False, default="ACTIVE", index=True)  # ACTIVE, DISABLED, EXPIRED
+    scan_profile_id = Column(String(36), ForeignKey("scan_profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    security_gate_id = Column(String(36), ForeignKey("security_gates.id", ondelete="SET NULL"), nullable=True, index=True)
+    timezone = Column(String(100), nullable=False, default="UTC")
+    schedule_type = Column(String(50), nullable=False, default="DAILY", index=True)  # ONCE, HOURLY, DAILY, WEEKLY, CRON
+    cron_expression = Column(String(100), nullable=True)
+    scheduled_at = Column(DateTime(timezone=True), nullable=True)
+    start_at = Column(DateTime(timezone=True), nullable=True)
+    end_at = Column(DateTime(timezone=True), nullable=True)
+    max_concurrent_runs = Column(Integer, nullable=False, default=1)
+    timeout_seconds = Column(Integer, nullable=False, default=600)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+    last_run_at = Column(DateTime(timezone=True), nullable=True)
+    next_run_at = Column(DateTime(timezone=True), nullable=True, index=True)
+
+    project = relationship("Project", back_populates="security_scan_schedules")
+    scan_profile = relationship("ScanProfile")
+    security_gate = relationship("SecurityGate")
+    executions = relationship(
+        "SecurityScheduledExecution",
+        back_populates="schedule",
+        order_by="SecurityScheduledExecution.created_at.desc()",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_scan_schedule_project_name"),
+        Index("ix_scan_schedules_proj_status", "project_id", "status"),
+        Index("ix_scan_schedules_due", "status", "next_run_at"),
+    )
+
+
+class SecurityScheduledExecution(Base):
+    __tablename__ = "security_scheduled_executions"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    schedule_id = Column(String(36), ForeignKey("security_scan_schedules.id", ondelete="SET NULL"), nullable=True, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    execution_plan_id = Column(String(36), ForeignKey("security_execution_plans.id", ondelete="SET NULL"), nullable=True, index=True)
+    status = Column(String(50), nullable=False, default="QUEUED", index=True)  # QUEUED, RUNNING, COMPLETED, FAILED, CANCELLED, SKIPPED
+    trigger_type = Column(String(50), nullable=False, default="SCHEDULED", index=True)  # SCHEDULED, MANUAL, RETRY
+    scheduled_for = Column(DateTime(timezone=True), nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    baseline_comparison_id = Column(String(36), ForeignKey("security_baseline_comparisons.id", ondelete="SET NULL"), nullable=True, index=True)
+    gate_evaluation_id = Column(String(36), ForeignKey("security_gate_evaluations.id", ondelete="SET NULL"), nullable=True, index=True)
+    report_id = Column(String(36), ForeignKey("security_reports.id", ondelete="SET NULL"), nullable=True, index=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    schedule = relationship("SecurityScanSchedule", back_populates="executions")
+    project = relationship("Project", back_populates="scheduled_executions")
+    execution_plan = relationship("SecurityExecutionPlan")
+    baseline_comparison = relationship("SecurityBaselineComparison")
+    gate_evaluation = relationship("SecurityGateEvaluation")
+    report = relationship("SecurityReport")
+
+    __table_args__ = (
+        Index("ix_scheduled_executions_proj_status", "project_id", "status"),
+        Index("ix_scheduled_executions_sched_status", "schedule_id", "status"),
+    )
+
+
 # Prevent pytest from treating model classes as test case classes
 AttackGraph.__test__ = False
 AttackGraphNode.__test__ = False
@@ -1620,3 +1698,5 @@ SecurityGateEvaluation.__test__ = False
 SecurityGateEvaluationItem.__test__ = False
 SecurityReport.__test__ = False
 SecurityReportSnapshot.__test__ = False
+SecurityScanSchedule.__test__ = False
+SecurityScheduledExecution.__test__ = False

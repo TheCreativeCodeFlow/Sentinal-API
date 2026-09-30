@@ -65,6 +65,21 @@ from app.services.security_engine.report_service import (
     InvalidReportSourceError,
     ArchivedReportError,
 )
+from app.services.security_engine.schedule_service import (
+    ScheduleService,
+    ScheduleError,
+    ScheduleNotFoundError,
+    DuplicateScheduleError,
+    InvalidScheduleError,
+    DisabledScheduleError,
+)
+from app.services.security_engine.scheduled_scan_service import (
+    ScheduledScanService,
+    ScheduledScanError,
+)
+from app.services.security_engine.scheduler import (
+    SchedulerRunner,
+)
 
 __all__ = [
     "AsyncSecurityHttpClient",
@@ -117,5 +132,15 @@ __all__ = [
     "ArchivedReportError",
     "redact_headers",
     "redact_text",
+    "ScheduleService",
+    "ScheduleError",
+    "ScheduleNotFoundError",
+    "DuplicateScheduleError",
+    "InvalidScheduleError",
+    "DisabledScheduleError",
+    "ScheduledScanService",
+    "ScheduledScanError",
+    "SchedulerRunner",
 ]
+
 

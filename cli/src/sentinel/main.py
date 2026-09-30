@@ -12,6 +12,7 @@ from sentinel.commands.project import project_group
 from sentinel.commands.report import report_group
 from sentinel.commands.result import result_command
 from sentinel.commands.scan import scan_command
+from sentinel.commands.schedule import schedule_group
 from sentinel.config import Config
 from sentinel.errors import EXIT_ERROR, SentinelError
 from sentinel.output import Formatter
@@ -51,6 +52,8 @@ cli.add_command(scan_command)
 cli.add_command(gate_group)
 cli.add_command(result_command)
 cli.add_command(report_group)
+cli.add_command(schedule_group)
+
 
 
 def main():
