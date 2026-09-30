@@ -23,6 +23,7 @@ const menuItems = [
   { href: "/scan-profiles", label: "Scan Profiles", key: "7k" },
   { href: "/baselines", label: "Baselines", key: "7l" },
   { href: "/baseline-comparisons", label: "Comparisons", key: "7m" },
+  { href: "/security-gates", label: "Security Gates", key: "7n" },
   { href: "/security-tests", label: "Security Tests", key: "8" },
   { href: "/findings", label: "Findings", key: "9" },
   { href: "/attack-surface", label: "Attack Surface", key: "10" },

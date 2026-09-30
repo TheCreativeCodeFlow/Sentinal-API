@@ -1830,3 +1830,162 @@ class SecurityBaselineComparisonDetailResponse(BaseModel):
 class ComparePlanWithBaselineRequest(BaseModel):
     baseline_id: str
     execution_plan_id: str
+
+
+# ==============================================================================
+# STAGE 10.3: CI/CD Security Regression Gates Schemas
+# ==============================================================================
+
+class GateStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    DISABLED = "DISABLED"
+
+
+class GateEvaluationStatus(str, Enum):
+    PASS = "PASS"
+    FAIL = "FAIL"
+    WARN = "WARN"
+    ERROR = "ERROR"
+
+
+class GateSeverity(str, Enum):
+    FAILURE = "FAILURE"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+
+
+class SecurityGateFailureRules(BaseModel):
+    max_regressions: int = Field(0, ge=0)
+    max_new_violations: int = Field(0, ge=0)
+    max_confirmed_findings: int = Field(0, ge=0)
+    max_failed_tests: int = Field(0, ge=0)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class SecurityGateWarningRules(BaseModel):
+    max_inconclusive: int = Field(0, ge=0)
+    max_errors: int = Field(0, ge=0)
+    max_not_applicable: int = Field(999999, ge=0)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class SecurityGateBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = None
+    status: str = "ACTIVE"
+    baseline_id: str
+    scan_profile_id: str
+    failure_rules: Dict[str, Any] = Field(default_factory=lambda: SecurityGateFailureRules().model_dump())
+    warning_rules: Dict[str, Any] = Field(default_factory=lambda: SecurityGateWarningRules().model_dump())
+
+
+class SecurityGateCreate(SecurityGateBase):
+    project_id: Optional[int] = None
+
+
+class SecurityGateUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[str] = None
+    status: Optional[str] = None
+    baseline_id: Optional[str] = None
+    scan_profile_id: Optional[str] = None
+    failure_rules: Optional[Dict[str, Any]] = None
+    warning_rules: Optional[Dict[str, Any]] = None
+
+
+class SecurityGateInDB(SecurityGateBase):
+    id: str
+    project_id: int
+    baseline_name: Optional[str] = None
+    baseline_version: Optional[int] = None
+    scan_profile_name: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    latest_evaluation_status: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SecurityGateListResponse(BaseModel):
+    project_id: int
+    count: int
+    gates: List[SecurityGateInDB] = []
+
+
+class SecurityGateEvaluationItemInDB(BaseModel):
+    id: str
+    evaluation_id: str
+    rule_type: str
+    severity: str
+    triggered: bool
+    actual_value: int
+    threshold: int
+    message: str
+    finding_id: Optional[str] = None
+    comparison_item_id: Optional[str] = None
+    security_test_id: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SecurityGateEvaluationInDB(BaseModel):
+    id: str
+    gate_id: str
+    project_id: int
+    baseline_comparison_id: str
+    status: str
+    failure_count: int = 0
+    warning_count: int = 0
+    confirmed_findings: int = 0
+    regressions: int = 0
+    new_violations: int = 0
+    failed_tests: int = 0
+    inconclusive_tests: int = 0
+    error_tests: int = 0
+    summary: Dict[str, Any] = Field(default_factory=dict)
+    evaluated_at: datetime
+    gate_name: Optional[str] = None
+    items: List[SecurityGateEvaluationItemInDB] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SecurityGateEvaluationListResponse(BaseModel):
+    project_id: int
+    count: int
+    evaluations: List[SecurityGateEvaluationInDB] = []
+
+
+class TriggeredRuleInfo(BaseModel):
+    rule_type: str
+    actual: int
+    threshold: int
+    severity: str
+    message: str
+    finding_ids: List[str] = []
+    comparison_item_ids: List[str] = []
+    security_test_ids: List[str] = []
+
+
+class SecurityGateMetrics(BaseModel):
+    new_violations: int = 0
+    regressions: int = 0
+    confirmed_findings: int = 0
+    failed_tests: int = 0
+    inconclusive_tests: int = 0
+    errors: int = 0
+    not_applicable: int = 0
+
+
+class SecurityGateCIResult(BaseModel):
+    status: str
+    exit_code: int
+    gate_id: str
+    gate_name: str
+    baseline_version: Optional[int] = None
+    evaluation_id: str
+    metrics: SecurityGateMetrics
+    triggered_rules: List[TriggeredRuleInfo] = []
+    evaluated_at: datetime

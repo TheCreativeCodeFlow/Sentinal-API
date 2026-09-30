@@ -51,6 +51,9 @@ from app.models import (
     SecurityBaselineControl,
     SecurityBaselineComparison,
     SecurityBaselineComparisonItem,
+    SecurityGate,
+    SecurityGateEvaluation,
+    SecurityGateEvaluationItem,
 )
 from app.schemas import (
     ProjectCreate,
@@ -232,6 +235,14 @@ from app.schemas import (
     SecurityBaselineComparisonInDB,
     SecurityBaselineComparisonItemInDB,
     SecurityBaselineComparisonDetailResponse,
+    SecurityGateCreate,
+    SecurityGateUpdate,
+    SecurityGateInDB,
+    SecurityGateListResponse,
+    SecurityGateEvaluationItemInDB,
+    SecurityGateEvaluationInDB,
+    SecurityGateEvaluationListResponse,
+    SecurityGateCIResult,
 )
 from app.services.security_engine.redactor import SENSITIVE_HEADER_NAMES
 from app.services.security_engine.correlation_engine import CorrelationEngine
@@ -265,6 +276,16 @@ from app.services.security_engine.baseline_service import (
     BaselineNotFoundError,
     ComparisonNotFoundError,
     InvalidBaselinePlanError,
+)
+from app.services.security_engine.security_gate_service import (
+    SecurityGateService,
+    SecurityGateError,
+    GateNotFoundError,
+    DuplicateGateError,
+    DisabledGateError,
+    InvalidGateRuleError,
+    InvalidEvaluationStateError,
+    get_gate_exit_code,
 )
 from app.services.ai import (
     AISecurityService,
@@ -6550,6 +6571,295 @@ def list_baseline_comparisons(
     return [format_comparison_response(c) for c in comparisons]
 
 
+# --- Security Gate Endpoints ---
+
+security_gate_router = APIRouter(tags=["Security Gates"])
+
+
+def format_gate_response(gate: SecurityGate) -> SecurityGateInDB:
+    latest_eval = (
+        sorted(gate.evaluations, key=lambda e: e.evaluated_at, reverse=True)[0]
+        if gate.evaluations
+        else None
+    )
+    return SecurityGateInDB(
+        id=gate.id,
+        project_id=gate.project_id,
+        name=gate.name,
+        description=gate.description,
+        status=gate.status,
+        baseline_id=gate.baseline_id,
+        scan_profile_id=gate.scan_profile_id,
+        failure_rules=gate.failure_rules or {},
+        warning_rules=gate.warning_rules or {},
+        created_at=gate.created_at,
+        updated_at=gate.updated_at,
+        baseline_name=gate.baseline.name if gate.baseline else None,
+        baseline_version=gate.baseline.version if gate.baseline else None,
+        scan_profile_name=gate.scan_profile.name if gate.scan_profile else None,
+        latest_evaluation_status=latest_eval.status if latest_eval else None,
+    )
+
+
+def format_evaluation_item(item: SecurityGateEvaluationItem) -> SecurityGateEvaluationItemInDB:
+    return SecurityGateEvaluationItemInDB(
+        id=item.id,
+        evaluation_id=item.evaluation_id,
+        rule_type=item.rule_type,
+        severity=item.severity,
+        triggered=item.triggered,
+        actual_value=item.actual_value,
+        threshold=item.threshold,
+        message=item.message,
+        finding_id=item.finding_id,
+        comparison_item_id=item.comparison_item_id,
+        security_test_id=item.security_test_id,
+    )
+
+
+def format_evaluation_response(ev: SecurityGateEvaluation) -> SecurityGateEvaluationInDB:
+    return SecurityGateEvaluationInDB(
+        id=ev.id,
+        gate_id=ev.gate_id,
+        project_id=ev.project_id,
+        baseline_comparison_id=ev.baseline_comparison_id,
+        status=ev.status,
+        failure_count=ev.failure_count,
+        warning_count=ev.warning_count,
+        confirmed_findings=ev.confirmed_findings,
+        regressions=ev.regressions,
+        new_violations=ev.new_violations,
+        failed_tests=ev.failed_tests,
+        inconclusive_tests=ev.inconclusive_tests,
+        error_tests=ev.error_tests,
+        summary=ev.summary or {},
+        evaluated_at=ev.evaluated_at,
+        gate_name=ev.gate.name if ev.gate else None,
+        items=[format_evaluation_item(i) for i in (ev.items or [])],
+    )
+
+
+@security_gate_router.post(
+    "/projects/{project_id}/security-gates",
+    response_model=SecurityGateInDB,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_security_gate(
+    project_id: int,
+    gate_in: SecurityGateCreate,
+    db: Session = Depends(get_db),
+):
+    get_project_or_404(project_id, db)
+    service = SecurityGateService(db=db)
+    try:
+        gate = service.create_gate(
+            project_id=project_id,
+            name=gate_in.name,
+            baseline_id=gate_in.baseline_id,
+            scan_profile_id=gate_in.scan_profile_id,
+            failure_rules=gate_in.failure_rules,
+            warning_rules=gate_in.warning_rules,
+            description=gate_in.description,
+            status=gate_in.status,
+        )
+    except DuplicateGateError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except GateNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except (InvalidGateRuleError, CrossProjectViolationError, SecurityGateError) as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return format_gate_response(gate)
+
+
+@security_gate_router.get(
+    "/projects/{project_id}/security-gates",
+    response_model=SecurityGateListResponse,
+)
+def list_security_gates(
+    project_id: int,
+    status: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    get_project_or_404(project_id, db)
+    service = SecurityGateService(db=db)
+    gates = service.list_gates(project_id=project_id, status=status)
+    return SecurityGateListResponse(
+        project_id=project_id,
+        count=len(gates),
+        gates=[format_gate_response(g) for g in gates],
+    )
+
+
+@security_gate_router.get(
+    "/security-gates/{gate_id}",
+    response_model=SecurityGateInDB,
+)
+def get_security_gate(
+    gate_id: str,
+    db: Session = Depends(get_db),
+):
+    service = SecurityGateService(db=db)
+    gate = service.get_gate(gate_id)
+    if not gate:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Security gate with ID {gate_id} not found.",
+        )
+    return format_gate_response(gate)
+
+
+@security_gate_router.patch(
+    "/security-gates/{gate_id}",
+    response_model=SecurityGateInDB,
+)
+def patch_security_gate(
+    gate_id: str,
+    gate_in: SecurityGateUpdate,
+    db: Session = Depends(get_db),
+):
+    service = SecurityGateService(db=db)
+    try:
+        gate = service.update_gate(
+            gate_id=gate_id,
+            name=gate_in.name,
+            description=gate_in.description,
+            status=gate_in.status,
+            baseline_id=gate_in.baseline_id,
+            scan_profile_id=gate_in.scan_profile_id,
+            failure_rules=gate_in.failure_rules,
+            warning_rules=gate_in.warning_rules,
+        )
+    except GateNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except DuplicateGateError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except (InvalidGateRuleError, CrossProjectViolationError, SecurityGateError) as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return format_gate_response(gate)
+
+
+@security_gate_router.put(
+    "/security-gates/{gate_id}",
+    response_model=SecurityGateInDB,
+)
+def put_security_gate(
+    gate_id: str,
+    gate_in: SecurityGateUpdate,
+    db: Session = Depends(get_db),
+):
+    return patch_security_gate(gate_id=gate_id, gate_in=gate_in, db=db)
+
+
+@security_gate_router.delete(
+    "/security-gates/{gate_id}",
+    status_code=status.HTTP_200_OK,
+)
+def delete_security_gate(
+    gate_id: str,
+    db: Session = Depends(get_db),
+):
+    service = SecurityGateService(db=db)
+    try:
+        service.delete_gate(gate_id)
+    except GateNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return {"message": "Security gate deleted successfully"}
+
+
+@security_gate_router.post(
+    "/security-gates/{gate_id}/evaluate/{comparison_id}",
+    response_model=SecurityGateEvaluationInDB,
+    status_code=status.HTTP_200_OK,
+)
+def evaluate_security_gate(
+    gate_id: str,
+    comparison_id: str,
+    db: Session = Depends(get_db),
+):
+    service = SecurityGateService(db=db)
+    try:
+        evaluation = service.evaluate_gate(
+            gate_id=gate_id,
+            baseline_comparison_id=comparison_id,
+        )
+    except GateNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except (DisabledGateError, InvalidEvaluationStateError, CrossProjectViolationError, SecurityGateError) as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return format_evaluation_response(evaluation)
+
+
+@security_gate_router.get(
+    "/security-gate-evaluations/{evaluation_id}",
+    response_model=SecurityGateEvaluationInDB,
+)
+def get_security_gate_evaluation(
+    evaluation_id: str,
+    db: Session = Depends(get_db),
+):
+    service = SecurityGateService(db=db)
+    evaluation = service.get_evaluation(evaluation_id)
+    if not evaluation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Security gate evaluation with ID {evaluation_id} not found.",
+        )
+    return format_evaluation_response(evaluation)
+
+
+@security_gate_router.get(
+    "/security-gate-evaluations/{evaluation_id}/items",
+    response_model=List[SecurityGateEvaluationItemInDB],
+)
+def get_security_gate_evaluation_items(
+    evaluation_id: str,
+    db: Session = Depends(get_db),
+):
+    service = SecurityGateService(db=db)
+    evaluation = service.get_evaluation(evaluation_id)
+    if not evaluation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Security gate evaluation with ID {evaluation_id} not found.",
+        )
+    return [format_evaluation_item(i) for i in (evaluation.items or [])]
+
+
+@security_gate_router.get(
+    "/security-gate-evaluations/{evaluation_id}/result",
+    response_model=SecurityGateCIResult,
+)
+def get_security_gate_ci_result(
+    evaluation_id: str,
+    db: Session = Depends(get_db),
+):
+    service = SecurityGateService(db=db)
+    try:
+        result = service.get_ci_result(evaluation_id)
+    except GateNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return result
+
+
+@security_gate_router.get(
+    "/projects/{project_id}/security-gate-evaluations",
+    response_model=SecurityGateEvaluationListResponse,
+)
+def list_project_security_gate_evaluations(
+    project_id: int,
+    gate_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    get_project_or_404(project_id, db)
+    service = SecurityGateService(db=db)
+    evaluations = service.list_evaluations(project_id=project_id, gate_id=gate_id)
+    return SecurityGateEvaluationListResponse(
+        project_id=project_id,
+        count=len(evaluations),
+        evaluations=[format_evaluation_response(e) for e in evaluations],
+    )
+
+
 # Include sub-routers into main router
 router.include_router(project_router)
 router.include_router(api_router)
@@ -6577,3 +6887,4 @@ router.include_router(execution_plan_router)
 router.include_router(scan_profile_router)
 router.include_router(baseline_router)
 router.include_router(baseline_comparison_router)
+router.include_router(security_gate_router)

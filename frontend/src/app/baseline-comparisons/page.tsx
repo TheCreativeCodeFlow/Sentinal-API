@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useSearchParams, useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 
@@ -79,6 +79,7 @@ interface ComparisonDetailResponse {
 }
 
 function BaselineComparisonsContent() {
+  const router = useRouter();
   const searchParams = useSearchParams();
   const preselectedBaselineId = searchParams.get("baseline_id");
 
@@ -584,7 +585,14 @@ function BaselineComparisonsContent() {
               )}
             </div>
 
-            <div className="p-4 border-t border-border flex justify-end">
+            <div className="p-4 border-t border-border flex justify-between items-center">
+              <Button
+                size="sm"
+                className="bg-primary text-primary-foreground hover:bg-primary/90 text-xs"
+                onClick={() => router.push(`/security-gates?comparison_id=${detailData.comparison.id}`)}
+              >
+                Evaluate with Security Gate 🛡️
+              </Button>
               <Button size="sm" variant="outline" onClick={() => setDetailData(null)}>
                 Close
               </Button>

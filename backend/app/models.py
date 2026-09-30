@@ -58,6 +58,7 @@ class Project(Base):
     execution_plans = relationship("SecurityExecutionPlan", back_populates="project", cascade="all, delete-orphan")
     scan_profiles = relationship("ScanProfile", back_populates="project", cascade="all, delete-orphan")
     baselines = relationship("SecurityBaseline", back_populates="project", cascade="all, delete-orphan")
+    security_gates = relationship("SecurityGate", back_populates="project", cascade="all, delete-orphan")
 
 
 class API(Base):
@@ -1434,6 +1435,102 @@ class SecurityBaselineComparisonItem(Base):
     )
 
 
+# ==============================================================================
+# STAGE 10.3: CI/CD Security Regression Gates Models
+# ==============================================================================
+
+class SecurityGate(Base):
+    __tablename__ = "security_gates"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    description = Column(Text, nullable=True)
+    status = Column(String(50), nullable=False, default="ACTIVE", index=True)  # ACTIVE, DISABLED
+    baseline_id = Column(String(36), ForeignKey("security_baselines.id", ondelete="CASCADE"), nullable=False, index=True)
+    scan_profile_id = Column(String(36), ForeignKey("scan_profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    failure_rules = Column(JSON, nullable=False, default=dict)
+    warning_rules = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    project = relationship("Project", back_populates="security_gates")
+    baseline = relationship("SecurityBaseline")
+    scan_profile = relationship("ScanProfile")
+    evaluations = relationship(
+        "SecurityGateEvaluation",
+        back_populates="gate",
+        cascade="all, delete-orphan",
+        order_by="SecurityGateEvaluation.evaluated_at.desc()",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_security_gate_project_name"),
+        Index("ix_security_gates_proj_status", "project_id", "status"),
+    )
+
+
+class SecurityGateEvaluation(Base):
+    __tablename__ = "security_gate_evaluations"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    gate_id = Column(String(36), ForeignKey("security_gates.id", ondelete="CASCADE"), nullable=False, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    baseline_comparison_id = Column(String(36), ForeignKey("security_baseline_comparisons.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String(50), nullable=False, index=True)  # PASS, FAIL, WARN, ERROR
+    failure_count = Column(Integer, nullable=False, default=0)
+    warning_count = Column(Integer, nullable=False, default=0)
+    confirmed_findings = Column(Integer, nullable=False, default=0)
+    regressions = Column(Integer, nullable=False, default=0)
+    new_violations = Column(Integer, nullable=False, default=0)
+    failed_tests = Column(Integer, nullable=False, default=0)
+    inconclusive_tests = Column(Integer, nullable=False, default=0)
+    error_tests = Column(Integer, nullable=False, default=0)
+    summary = Column(JSON, nullable=True)
+    evaluated_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    gate = relationship("SecurityGate", back_populates="evaluations")
+    project = relationship("Project")
+    baseline_comparison = relationship("SecurityBaselineComparison")
+    items = relationship(
+        "SecurityGateEvaluationItem",
+        back_populates="evaluation",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("gate_id", "baseline_comparison_id", name="uq_gate_evaluation_gate_comparison"),
+        Index("ix_gate_evals_proj_status", "project_id", "status"),
+    )
+
+
+class SecurityGateEvaluationItem(Base):
+    __tablename__ = "security_gate_evaluation_items"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    evaluation_id = Column(String(36), ForeignKey("security_gate_evaluations.id", ondelete="CASCADE"), nullable=False, index=True)
+    rule_type = Column(String(100), nullable=False, index=True)
+    severity = Column(String(50), nullable=False)  # FAILURE, WARNING, ERROR
+    triggered = Column(Boolean, nullable=False, default=False)
+    actual_value = Column(Integer, nullable=False, default=0)
+    threshold = Column(Integer, nullable=False, default=0)
+    message = Column(Text, nullable=False)
+    finding_id = Column(String(36), ForeignKey("findings.id", ondelete="SET NULL"), nullable=True, index=True)
+    comparison_item_id = Column(String(36), ForeignKey("security_baseline_comparison_items.id", ondelete="SET NULL"), nullable=True, index=True)
+    security_test_id = Column(String(36), ForeignKey("security_tests.id", ondelete="SET NULL"), nullable=True, index=True)
+
+    evaluation = relationship("SecurityGateEvaluation", back_populates="items")
+    finding = relationship("Finding")
+    comparison_item = relationship("SecurityBaselineComparisonItem")
+    security_test = relationship("SecurityTest")
+
+    __table_args__ = (
+        Index("ix_gate_eval_items_eval_rule", "evaluation_id", "rule_type"),
+    )
+
+
 # Prevent pytest from treating model classes as test case classes
 AttackGraph.__test__ = False
 AttackGraphNode.__test__ = False
@@ -1458,3 +1555,6 @@ SecurityBaseline.__test__ = False
 SecurityBaselineControl.__test__ = False
 SecurityBaselineComparison.__test__ = False
 SecurityBaselineComparisonItem.__test__ = False
+SecurityGate.__test__ = False
+SecurityGateEvaluation.__test__ = False
+SecurityGateEvaluationItem.__test__ = False

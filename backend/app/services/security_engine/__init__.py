@@ -47,6 +47,17 @@ from app.services.security_engine.baseline_service import (
     InvalidBaselinePlanError,
 )
 
+from app.services.security_engine.security_gate_service import (
+    SecurityGateService,
+    SecurityGateError,
+    GateNotFoundError,
+    DuplicateGateError,
+    DisabledGateError,
+    InvalidGateRuleError,
+    InvalidEvaluationStateError,
+    get_gate_exit_code,
+)
+
 __all__ = [
     "AsyncSecurityHttpClient",
     "ExecutionResult",
@@ -82,6 +93,14 @@ __all__ = [
     "BaselineNotFoundError",
     "ComparisonNotFoundError",
     "InvalidBaselinePlanError",
+    "SecurityGateService",
+    "SecurityGateError",
+    "GateNotFoundError",
+    "DuplicateGateError",
+    "DisabledGateError",
+    "InvalidGateRuleError",
+    "InvalidEvaluationStateError",
+    "get_gate_exit_code",
     "redact_headers",
     "redact_text",
 ]
