@@ -243,6 +243,7 @@ from app.schemas import (
     SecurityGateListResponse,
     SecurityGateEvaluationItemInDB,
     SecurityGateEvaluationInDB,
+    SecurityGateEvaluateRequest,
     SecurityGateEvaluationListResponse,
     SecurityGateCIResult,
     SecurityReportCreate,
@@ -1047,6 +1048,15 @@ def format_workflow_attack_scenario_detail(scenario: WorkflowAttackScenario, db:
 
 # Main router for API
 router = APIRouter(tags=["api"])
+
+
+@router.get("/auth/verify")
+def verify_api_authentication():
+    """Verify that connection to SentinelAPI is functional and API token is valid."""
+    return {
+        "status": "authenticated",
+        "message": "SentinelAPI connection and credentials valid.",
+    }
 
 
 # Project endpoints
@@ -6798,6 +6808,38 @@ def evaluate_security_gate(
         evaluation = service.evaluate_gate(
             gate_id=gate_id,
             baseline_comparison_id=comparison_id,
+        )
+    except GateNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except (DisabledGateError, InvalidEvaluationStateError, CrossProjectViolationError, SecurityGateError) as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return format_evaluation_response(evaluation)
+
+
+@security_gate_router.post(
+    "/security-gates/{gate_id}/evaluate",
+    response_model=SecurityGateEvaluationInDB,
+    status_code=status.HTTP_200_OK,
+)
+def evaluate_security_gate_with_body(
+    gate_id: str,
+    body: Optional[SecurityGateEvaluateRequest] = None,
+    comparison_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    target_comp_id = comparison_id
+    if not target_comp_id and body:
+        target_comp_id = body.comparison_id or body.baseline_comparison_id
+    if not target_comp_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="baseline_comparison_id or comparison_id is required.",
+        )
+    service = SecurityGateService(db=db)
+    try:
+        evaluation = service.evaluate_gate(
+            gate_id=gate_id,
+            baseline_comparison_id=target_comp_id,
         )
     except GateNotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))

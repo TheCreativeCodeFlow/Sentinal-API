@@ -1952,6 +1952,11 @@ class SecurityGateEvaluationInDB(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class SecurityGateEvaluateRequest(BaseModel):
+    comparison_id: Optional[str] = None
+    baseline_comparison_id: Optional[str] = None
+
+
 class SecurityGateEvaluationListResponse(BaseModel):
     project_id: int
     count: int

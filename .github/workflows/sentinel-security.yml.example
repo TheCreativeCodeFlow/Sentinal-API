@@ -1,0 +1,61 @@
+# Example GitHub Actions Workflow for SentinelAPI CI Security Regression Gate
+# Copy this file to .github/workflows/sentinel-security.yml to activate in your pipeline.
+
+name: SentinelAPI Security Gate
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  security-gate:
+    name: Evaluate API Security Gate
+    runs-on: ubuntu-latest
+
+    env:
+      SENTINEL_API_URL: ${{ secrets.SENTINEL_API_URL }}
+      SENTINEL_API_TOKEN: ${{ secrets.SENTINEL_API_TOKEN }}
+      SENTINEL_PROJECT_ID: ${{ vars.SENTINEL_PROJECT_ID }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install SentinelAPI CLI
+        # In repository development, install local package.
+        # When published to an internal registry: pip install sentinelapi-cli
+        run: |
+          pip install -e ./cli
+
+      - name: Verify CLI Connectivity
+        run: |
+          sentinel --version
+          sentinel project current
+
+      - name: Run Security Scan
+        id: scan
+        run: |
+          echo "Triggering security scan..."
+          SCAN_JSON=$(sentinel scan --profile "standard-audit" --wait --json)
+          PLAN_ID=$(echo "$SCAN_JSON" | jq -r '.id')
+          echo "plan_id=$PLAN_ID" >> $GITHUB_OUTPUT
+
+      - name: Evaluate Security Gate
+        run: |
+          echo "Evaluating CI regression gate for execution plan ${{ steps.scan.outputs.plan_id }}..."
+          sentinel gate run "production-ci-gate" --execution "${{ steps.scan.outputs.plan_id }}" --json > gate-eval.json
+          cat gate-eval.json
+
+      - name: Upload Gate Evaluation Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sentinel-gate-evaluation
+          path: gate-eval.json
