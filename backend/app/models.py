@@ -56,6 +56,8 @@ class Project(Base):
     investigations = relationship("SecurityInvestigation", back_populates="project", cascade="all, delete-orphan")
     test_suites = relationship("SecurityTestSuite", back_populates="project", cascade="all, delete-orphan")
     execution_plans = relationship("SecurityExecutionPlan", back_populates="project", cascade="all, delete-orphan")
+    scan_profiles = relationship("ScanProfile", back_populates="project", cascade="all, delete-orphan")
+    baselines = relationship("SecurityBaseline", back_populates="project", cascade="all, delete-orphan")
 
 
 class API(Base):
@@ -1221,6 +1223,7 @@ class SecurityExecutionPlan(Base):
     id = Column(String(36), primary_key=True, default=generate_uuid)
     project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
     suite_id = Column(String(36), ForeignKey("security_test_suites.id", ondelete="SET NULL"), nullable=True, index=True)
+    profile_id = Column(String(36), ForeignKey("scan_profiles.id", ondelete="SET NULL"), nullable=True, index=True)
     name = Column(String(200), nullable=False, index=True)
     status = Column(String(50), nullable=False, default="DRAFT", index=True)  # DRAFT, READY, RUNNING, COMPLETED, FAILED, CANCELLED
     execution_mode = Column(String(50), nullable=False, default="SEQUENTIAL", index=True)  # SEQUENTIAL, FAIL_FAST, CONTINUE_ON_FAILURE
@@ -1235,6 +1238,7 @@ class SecurityExecutionPlan(Base):
 
     project = relationship("Project", back_populates="execution_plans")
     suite = relationship("SecurityTestSuite", back_populates="execution_plans")
+    scan_profile = relationship("ScanProfile", back_populates="execution_plans")
     items = relationship(
         "SecurityExecutionItem",
         back_populates="execution_plan",
@@ -1246,9 +1250,22 @@ class SecurityExecutionPlan(Base):
     def suite_name(self) -> Optional[str]:
         return self.suite.name if self.suite else None
 
+    @property
+    def profile_name(self) -> Optional[str]:
+        return self.scan_profile.name if self.scan_profile else None
+
+    @property
+    def source_type(self) -> str:
+        if self.profile_id:
+            return "PROFILE"
+        elif self.suite_id:
+            return "SUITE"
+        return "CUSTOM"
+
     __table_args__ = (
         Index("ix_execution_plans_project_status", "project_id", "status"),
         Index("ix_execution_plans_suite_id", "suite_id"),
+        Index("ix_execution_plans_profile_id", "profile_id"),
     )
 
 
@@ -1293,6 +1310,130 @@ class SecurityExecutionItem(Base):
     )
 
 
+# ==============================================================================
+# STAGE 10.2: Scan Profiles & Security Baselines Models
+# ==============================================================================
+
+class ScanProfile(Base):
+    __tablename__ = "scan_profiles"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    description = Column(Text, nullable=True)
+    profile_type = Column(String(50), nullable=False, default="STANDARD", index=True)  # QUICK, STANDARD, DEEP, CUSTOM
+    status = Column(String(50), nullable=False, default="ACTIVE", index=True)  # ACTIVE, DISABLED
+    configuration = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    project = relationship("Project", back_populates="scan_profiles")
+    execution_plans = relationship("SecurityExecutionPlan", back_populates="scan_profile")
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_scan_profile_project_name"),
+        Index("ix_scan_profiles_project_status", "project_id", "status"),
+    )
+
+
+class SecurityBaseline(Base):
+    __tablename__ = "security_baselines"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    description = Column(Text, nullable=True)
+    status = Column(String(50), nullable=False, default="DRAFT", index=True)  # DRAFT, ACTIVE, ARCHIVED
+    source_execution_plan_id = Column(String(36), ForeignKey("security_execution_plans.id", ondelete="SET NULL"), nullable=True, index=True)
+    version = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    project = relationship("Project", back_populates="baselines")
+    source_execution_plan = relationship("SecurityExecutionPlan")
+    controls = relationship("SecurityBaselineControl", back_populates="baseline", cascade="all, delete-orphan")
+    comparisons = relationship("SecurityBaselineComparison", back_populates="baseline", cascade="all, delete-orphan")
+
+    @property
+    def control_count(self) -> int:
+        return len(self.controls) if self.controls else 0
+
+    __table_args__ = (
+        Index("ix_baselines_project_status", "project_id", "status"),
+        UniqueConstraint("project_id", "version", name="uq_baseline_project_version"),
+    )
+
+
+class SecurityBaselineControl(Base):
+    __tablename__ = "security_baseline_controls"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    baseline_id = Column(String(36), ForeignKey("security_baselines.id", ondelete="CASCADE"), nullable=False, index=True)
+    control_type = Column(String(100), nullable=False, index=True)  # AUTHENTICATION_REQUIRED, AUTHORIZATION_REQUIRED, BOLA_PROTECTION, BFLA_PROTECTION, PROPERTY_PROTECTION, WORKFLOW_PROTECTION
+    target_type = Column(String(50), nullable=False, index=True)  # PROJECT, ENDPOINT, RESOURCE, PROPERTY, WORKFLOW
+    target_id = Column(String(255), nullable=False, index=True)
+    expected_behavior = Column(String(255), nullable=False)
+    severity = Column(String(50), nullable=False, default="HIGH")
+    enabled = Column(Boolean, nullable=False, default=True)
+    configuration = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    baseline = relationship("SecurityBaseline", back_populates="controls")
+
+    __table_args__ = (
+        UniqueConstraint("baseline_id", "control_type", "target_type", "target_id", name="uq_baseline_control_target"),
+        Index("ix_baseline_controls_type", "baseline_id", "control_type"),
+    )
+
+
+class SecurityBaselineComparison(Base):
+    __tablename__ = "security_baseline_comparisons"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    baseline_id = Column(String(36), ForeignKey("security_baselines.id", ondelete="CASCADE"), nullable=False, index=True)
+    execution_plan_id = Column(String(36), ForeignKey("security_execution_plans.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String(50), nullable=False, default="COMPLETED")
+    summary = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    baseline = relationship("SecurityBaseline", back_populates="comparisons")
+    execution_plan = relationship("SecurityExecutionPlan")
+    items = relationship("SecurityBaselineComparisonItem", back_populates="comparison", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("ix_baseline_comparisons_baseline_plan", "baseline_id", "execution_plan_id"),
+    )
+
+
+class SecurityBaselineComparisonItem(Base):
+    __tablename__ = "security_baseline_comparison_items"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    comparison_id = Column(String(36), ForeignKey("security_baseline_comparisons.id", ondelete="CASCADE"), nullable=False, index=True)
+    control_id = Column(String(36), ForeignKey("security_baseline_controls.id", ondelete="SET NULL"), nullable=True, index=True)
+    security_test_id = Column(String(36), ForeignKey("security_tests.id", ondelete="SET NULL"), nullable=True, index=True)
+    finding_id = Column(String(36), ForeignKey("findings.id", ondelete="SET NULL"), nullable=True, index=True)
+    result = Column(String(50), nullable=False, index=True)  # NEW_VIOLATION, REGRESSION, UNCHANGED, IMPROVED, NOT_APPLICABLE
+    previous_behavior = Column(String(255), nullable=True)
+    current_behavior = Column(String(255), nullable=True)
+    explanation = Column(Text, nullable=False)
+    evidence_reference = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    comparison = relationship("SecurityBaselineComparison", back_populates="items")
+    control = relationship("SecurityBaselineControl")
+    security_test = relationship("SecurityTest")
+    finding = relationship("Finding")
+
+    __table_args__ = (
+        Index("ix_comparison_items_comp_res", "comparison_id", "result"),
+    )
+
+
 # Prevent pytest from treating model classes as test case classes
 AttackGraph.__test__ = False
 AttackGraphNode.__test__ = False
@@ -1312,3 +1453,8 @@ SecurityTestSuite.__test__ = False
 SecurityTestSuiteItem.__test__ = False
 SecurityExecutionPlan.__test__ = False
 SecurityExecutionItem.__test__ = False
+ScanProfile.__test__ = False
+SecurityBaseline.__test__ = False
+SecurityBaselineControl.__test__ = False
+SecurityBaselineComparison.__test__ = False
+SecurityBaselineComparisonItem.__test__ = False

@@ -27,6 +27,9 @@ interface SecurityExecutionPlanDetail {
   project_id: number;
   suite_id?: string | null;
   suite_name?: string | null;
+  profile_id?: string | null;
+  profile_name?: string | null;
+  source_type?: "PROFILE" | "SUITE" | "CUSTOM";
   name: string;
   status: "DRAFT" | "READY" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
   execution_mode: "SEQUENTIAL" | "FAIL_FAST" | "CONTINUE_ON_FAILURE";
@@ -237,11 +240,15 @@ export default function ExecutionPlanDetailPage({
           </h1>
 
           <div className="flex items-center gap-3 text-xs text-muted-foreground pt-0.5 flex-wrap">
-            {plan.suite_name && (
+            {plan.profile_name ? (
+              <span>
+                Profile: <span className="text-cyan-400 font-medium">{plan.profile_name}</span>
+              </span>
+            ) : plan.suite_name ? (
               <span>
                 Suite: <span className="text-foreground font-medium">{plan.suite_name}</span>
               </span>
-            )}
+            ) : null}
             <span>•</span>
             <span>
               Mode: <span className="font-mono text-foreground font-semibold">{plan.execution_mode}</span>
@@ -253,6 +260,24 @@ export default function ExecutionPlanDetailPage({
 
         {/* Action Controls */}
         <div className="flex items-center gap-2">
+          {plan.status === "COMPLETED" && (
+            <>
+              <Button
+                variant="outline"
+                onClick={() => router.push("/baselines")}
+                className="text-xs font-semibold gap-1.5"
+              >
+                Capture as Baseline
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => router.push("/baseline-comparisons")}
+                className="text-xs font-semibold gap-1.5"
+              >
+                Compare with Baseline
+              </Button>
+            </>
+          )}
           {(plan.status === "DRAFT" || plan.status === "READY") && (
             <Button
               onClick={handleStart}

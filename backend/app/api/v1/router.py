@@ -46,6 +46,11 @@ from app.models import (
     SecurityTestSuiteItem,
     SecurityExecutionPlan,
     SecurityExecutionItem,
+    ScanProfile,
+    SecurityBaseline,
+    SecurityBaselineControl,
+    SecurityBaselineComparison,
+    SecurityBaselineComparisonItem,
 )
 from app.schemas import (
     ProjectCreate,
@@ -211,6 +216,22 @@ from app.schemas import (
     SecurityExecutionPlanInDB,
     SecurityExecutionPlanListResponse,
     SecurityExecutionProgressResponse,
+    ScanProfileCreate,
+    ScanProfileUpdate,
+    ScanProfileInDB,
+    ScanProfileListResponse,
+    ScanProfilePreviewResponse,
+    TestSelectionReason,
+    PlanFromProfileRequest,
+    SecurityBaselineCreate,
+    SecurityBaselineUpdate,
+    SecurityBaselineInDB,
+    SecurityBaselineListResponse,
+    BaselineFromPlanRequest,
+    SecurityBaselineControlInDB,
+    SecurityBaselineComparisonInDB,
+    SecurityBaselineComparisonItemInDB,
+    SecurityBaselineComparisonDetailResponse,
 )
 from app.services.security_engine.redactor import SENSITIVE_HEADER_NAMES
 from app.services.security_engine.correlation_engine import CorrelationEngine
@@ -229,6 +250,21 @@ from app.services.security_engine.orchestrator import (
     AuthorizationError as OrchestratorAuthorizationError,
     EntityNotFoundError as OrchestratorEntityNotFoundError,
     InvalidSuiteStateError,
+)
+from app.services.security_engine.scan_profile_service import (
+    ScanProfileService,
+    ScanProfileError,
+    ProfileNotFoundError,
+    DuplicateProfileError,
+    DisabledProfileError,
+)
+from app.services.security_engine.baseline_service import (
+    SecurityBaselineService,
+    BaselineComparisonService,
+    BaselineError,
+    BaselineNotFoundError,
+    ComparisonNotFoundError,
+    InvalidBaselinePlanError,
 )
 from app.services.ai import (
     AISecurityService,
@@ -5676,6 +5712,9 @@ def format_plan_response(plan: SecurityExecutionPlan) -> SecurityExecutionPlanIn
         id=plan.id,
         project_id=plan.project_id,
         suite_id=plan.suite_id,
+        profile_id=plan.profile_id,
+        profile_name=plan.profile_name,
+        source_type=plan.source_type,
         name=plan.name,
         status=plan.status,
         execution_mode=plan.execution_mode,
@@ -6035,6 +6074,482 @@ def get_execution_plan_progress(
     return format_plan_progress_response(progress)
 
 
+# ==============================================================================
+# STAGE 10.2: Scan Profiles & Security Baselines Routers
+# ==============================================================================
+
+scan_profile_router = APIRouter(tags=["Scan Profiles"])
+baseline_router = APIRouter(tags=["Security Baselines"])
+baseline_comparison_router = APIRouter(tags=["Baseline Comparisons"])
+
+
+def format_scan_profile_response(profile: ScanProfile) -> ScanProfileInDB:
+    return ScanProfileInDB(
+        id=profile.id,
+        project_id=profile.project_id,
+        name=profile.name,
+        description=profile.description,
+        profile_type=profile.profile_type,
+        status=profile.status,
+        configuration=profile.configuration or {},
+        created_at=profile.created_at,
+        updated_at=profile.updated_at,
+    )
+
+
+def format_baseline_response(baseline: SecurityBaseline) -> SecurityBaselineInDB:
+    controls = [
+        SecurityBaselineControlInDB(
+            id=c.id,
+            baseline_id=c.baseline_id,
+            control_type=c.control_type,
+            target_type=c.target_type,
+            target_id=c.target_id,
+            expected_behavior=c.expected_behavior,
+            severity=c.severity,
+            enabled=c.enabled,
+            configuration=c.configuration or {},
+            created_at=c.created_at,
+        )
+        for c in (baseline.controls or [])
+    ]
+    return SecurityBaselineInDB(
+        id=baseline.id,
+        project_id=baseline.project_id,
+        name=baseline.name,
+        description=baseline.description,
+        status=baseline.status,
+        source_execution_plan_id=baseline.source_execution_plan_id,
+        version=baseline.version,
+        control_count=len(controls),
+        created_at=baseline.created_at,
+        updated_at=baseline.updated_at,
+        controls=controls,
+    )
+
+
+def format_comparison_item(item: SecurityBaselineComparisonItem) -> SecurityBaselineComparisonItemInDB:
+    return SecurityBaselineComparisonItemInDB(
+        id=item.id,
+        comparison_id=item.comparison_id,
+        control_id=item.control_id,
+        security_test_id=item.security_test_id,
+        finding_id=item.finding_id,
+        result=item.result,
+        previous_behavior=item.previous_behavior,
+        current_behavior=item.current_behavior,
+        explanation=item.explanation,
+        evidence_reference=item.evidence_reference or {},
+        created_at=item.created_at,
+    )
+
+
+def format_comparison_response(comp: SecurityBaselineComparison) -> SecurityBaselineComparisonInDB:
+    items = [format_comparison_item(i) for i in (comp.items or [])]
+    return SecurityBaselineComparisonInDB(
+        id=comp.id,
+        baseline_id=comp.baseline_id,
+        execution_plan_id=comp.execution_plan_id,
+        status=comp.status,
+        summary=comp.summary or {},
+        created_at=comp.created_at,
+        items=items,
+    )
+
+
+# --- Scan Profile Endpoints ---
+
+@scan_profile_router.post(
+    "/projects/{project_id}/scan-profiles",
+    response_model=ScanProfileInDB,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_scan_profile(
+    project_id: int,
+    profile_in: ScanProfileCreate,
+    db: Session = Depends(get_db),
+):
+    get_project_or_404(project_id, db)
+    service = ScanProfileService(db=db)
+    try:
+        profile = service.create_profile(
+            project_id=project_id,
+            name=profile_in.name,
+            profile_type=profile_in.profile_type,
+            description=profile_in.description,
+            configuration=profile_in.configuration,
+            status=profile_in.status,
+        )
+    except DuplicateProfileError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except ProfileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return format_scan_profile_response(profile)
+
+
+@scan_profile_router.get(
+    "/projects/{project_id}/scan-profiles",
+    response_model=ScanProfileListResponse,
+)
+def list_scan_profiles(
+    project_id: int,
+    status: Optional[str] = None,
+    profile_type: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    get_project_or_404(project_id, db)
+    service = ScanProfileService(db=db)
+    profiles = service.list_profiles(project_id, status=status, profile_type=profile_type)
+    return ScanProfileListResponse(
+        project_id=project_id,
+        count=len(profiles),
+        profiles=[format_scan_profile_response(p) for p in profiles],
+    )
+
+
+@scan_profile_router.get(
+    "/scan-profiles/{profile_id}",
+    response_model=ScanProfileInDB,
+)
+def get_scan_profile(
+    profile_id: str,
+    db: Session = Depends(get_db),
+):
+    service = ScanProfileService(db=db)
+    profile = service.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scan profile with ID {profile_id} not found.",
+        )
+    return format_scan_profile_response(profile)
+
+
+@scan_profile_router.put(
+    "/scan-profiles/{profile_id}",
+    response_model=ScanProfileInDB,
+)
+def update_scan_profile(
+    profile_id: str,
+    profile_in: ScanProfileUpdate,
+    db: Session = Depends(get_db),
+):
+    service = ScanProfileService(db=db)
+    try:
+        profile = service.update_profile(
+            profile_id=profile_id,
+            name=profile_in.name,
+            description=profile_in.description,
+            profile_type=profile_in.profile_type,
+            status=profile_in.status,
+            configuration=profile_in.configuration,
+        )
+    except ProfileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except DuplicateProfileError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return format_scan_profile_response(profile)
+
+
+@scan_profile_router.delete(
+    "/scan-profiles/{profile_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_scan_profile(
+    profile_id: str,
+    db: Session = Depends(get_db),
+):
+    service = ScanProfileService(db=db)
+    try:
+        service.delete_profile(profile_id)
+    except ProfileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return None
+
+
+@scan_profile_router.get(
+    "/scan-profiles/{profile_id}/preview",
+    response_model=ScanProfilePreviewResponse,
+)
+def preview_scan_profile(
+    profile_id: str,
+    db: Session = Depends(get_db),
+):
+    service = ScanProfileService(db=db)
+    try:
+        preview_data = service.preview_profile(profile_id)
+    except ProfileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return ScanProfilePreviewResponse(
+        profile_id=preview_data["profile_id"],
+        profile_name=preview_data["profile_name"],
+        profile_type=preview_data["profile_type"],
+        selected_test_count=preview_data["selected_test_count"],
+        selected_tests=[
+            TestSelectionReason(
+                security_test_id=t["security_test_id"],
+                test_type=t["test_type"],
+                endpoint=t["endpoint"],
+                priority=t["priority"],
+                reason=t["reason"],
+            )
+            for t in preview_data["selected_tests"]
+        ],
+    )
+
+
+@scan_profile_router.post(
+    "/scan-profiles/{profile_id}/create-plan",
+    response_model=SecurityExecutionPlanInDB,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_plan_from_profile(
+    profile_id: str,
+    plan_in: PlanFromProfileRequest,
+    db: Session = Depends(get_db),
+):
+    service = ScanProfileService(db=db)
+    profile = service.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scan profile with ID {profile_id} not found.",
+        )
+    try:
+        plan = service.create_plan_from_profile(
+            project_id=profile.project_id,
+            profile_id=profile_id,
+            name=plan_in.name,
+            execution_mode=plan_in.execution_mode,
+        )
+    except DisabledProfileError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except ProfileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return format_plan_response(plan)
+
+
+# --- Security Baseline Endpoints ---
+
+@baseline_router.post(
+    "/projects/{project_id}/baselines",
+    response_model=SecurityBaselineInDB,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_baseline(
+    project_id: int,
+    baseline_in: SecurityBaselineCreate,
+    db: Session = Depends(get_db),
+):
+    get_project_or_404(project_id, db)
+    service = SecurityBaselineService(db=db)
+    try:
+        baseline = service.create_baseline(
+            project_id=project_id,
+            name=baseline_in.name,
+            description=baseline_in.description,
+            source_execution_plan_id=baseline_in.source_execution_plan_id,
+            status=baseline_in.status,
+        )
+    except BaselineNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return format_baseline_response(baseline)
+
+
+@baseline_router.post(
+    "/projects/{project_id}/baselines/from-plan",
+    response_model=SecurityBaselineInDB,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_baseline_from_plan(
+    project_id: int,
+    req: BaselineFromPlanRequest,
+    db: Session = Depends(get_db),
+):
+    get_project_or_404(project_id, db)
+    service = SecurityBaselineService(db=db)
+    try:
+        baseline = service.create_baseline_from_execution_plan(
+            project_id=project_id,
+            execution_plan_id=req.execution_plan_id,
+            name=req.name,
+            description=req.description,
+        )
+    except BaselineNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except (InvalidBaselinePlanError, CrossProjectViolationError) as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return format_baseline_response(baseline)
+
+
+@baseline_router.get(
+    "/projects/{project_id}/baselines",
+    response_model=SecurityBaselineListResponse,
+)
+def list_baselines(
+    project_id: int,
+    status: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    get_project_or_404(project_id, db)
+    service = SecurityBaselineService(db=db)
+    baselines = service.list_baselines(project_id=project_id, status=status)
+    return SecurityBaselineListResponse(
+        project_id=project_id,
+        count=len(baselines),
+        baselines=[format_baseline_response(b) for b in baselines],
+    )
+
+
+@baseline_router.get(
+    "/baselines/{baseline_id}",
+    response_model=SecurityBaselineInDB,
+)
+def get_baseline(
+    baseline_id: str,
+    db: Session = Depends(get_db),
+):
+    service = SecurityBaselineService(db=db)
+    baseline = service.get_baseline(baseline_id)
+    if not baseline:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Security baseline with ID {baseline_id} not found.",
+        )
+    return format_baseline_response(baseline)
+
+
+@baseline_router.put(
+    "/baselines/{baseline_id}",
+    response_model=SecurityBaselineInDB,
+)
+def update_baseline(
+    baseline_id: str,
+    baseline_in: SecurityBaselineUpdate,
+    db: Session = Depends(get_db),
+):
+    service = SecurityBaselineService(db=db)
+    try:
+        baseline = service.update_baseline(
+            baseline_id=baseline_id,
+            name=baseline_in.name,
+            description=baseline_in.description,
+            status=baseline_in.status,
+        )
+    except BaselineNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return format_baseline_response(baseline)
+
+
+@baseline_router.post(
+    "/baselines/{baseline_id}/activate",
+    response_model=SecurityBaselineInDB,
+)
+def activate_baseline(
+    baseline_id: str,
+    db: Session = Depends(get_db),
+):
+    service = SecurityBaselineService(db=db)
+    try:
+        baseline = service.activate_baseline(baseline_id)
+    except BaselineNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return format_baseline_response(baseline)
+
+
+@baseline_router.post(
+    "/baselines/{baseline_id}/archive",
+    response_model=SecurityBaselineInDB,
+)
+def archive_baseline(
+    baseline_id: str,
+    db: Session = Depends(get_db),
+):
+    service = SecurityBaselineService(db=db)
+    try:
+        baseline = service.archive_baseline(baseline_id)
+    except BaselineNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return format_baseline_response(baseline)
+
+
+# --- Baseline Comparison Endpoints ---
+
+@baseline_comparison_router.post(
+    "/baselines/{baseline_id}/compare",
+    response_model=SecurityBaselineComparisonInDB,
+    status_code=status.HTTP_201_CREATED,
+)
+def compare_baseline_with_plan(
+    baseline_id: str,
+    req: BaselineFromPlanRequest,
+    db: Session = Depends(get_db),
+):
+    service = BaselineComparisonService(db=db)
+    try:
+        comparison = service.compare_baseline_with_plan(
+            baseline_id=baseline_id,
+            execution_plan_id=req.execution_plan_id,
+        )
+    except BaselineNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except (InvalidBaselinePlanError, CrossProjectViolationError) as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return format_comparison_response(comparison)
+
+
+@baseline_comparison_router.get(
+    "/baseline-comparisons/{comparison_id}",
+    response_model=SecurityBaselineComparisonDetailResponse,
+)
+def get_baseline_comparison(
+    comparison_id: str,
+    db: Session = Depends(get_db),
+):
+    service = BaselineComparisonService(db=db)
+    comparison = service.get_comparison(comparison_id)
+    if not comparison:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Baseline comparison with ID {comparison_id} not found.",
+        )
+
+    formatted_items = [format_comparison_item(i) for i in (comparison.items or [])]
+    regressions = [i for i in formatted_items if i.result == "REGRESSION"]
+    new_violations = [i for i in formatted_items if i.result == "NEW_VIOLATION"]
+    improvements = [i for i in formatted_items if i.result == "IMPROVED"]
+    unchanged = [i for i in formatted_items if i.result == "UNCHANGED"]
+    not_applicable = [i for i in formatted_items if i.result == "NOT_APPLICABLE"]
+
+    return SecurityBaselineComparisonDetailResponse(
+        comparison=format_comparison_response(comparison),
+        baseline_name=comparison.baseline.name if comparison.baseline else "Baseline",
+        baseline_version=comparison.baseline.version if comparison.baseline else 1,
+        plan_name=comparison.execution_plan.name if comparison.execution_plan else "Plan",
+        plan_status=comparison.execution_plan.status if comparison.execution_plan else "COMPLETED",
+        regressions=regressions,
+        new_violations=new_violations,
+        improvements=improvements,
+        unchanged=unchanged,
+        not_applicable=not_applicable,
+    )
+
+
+@baseline_comparison_router.get(
+    "/projects/{project_id}/baseline-comparisons",
+    response_model=List[SecurityBaselineComparisonInDB],
+)
+def list_baseline_comparisons(
+    project_id: int,
+    baseline_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    get_project_or_404(project_id, db)
+    service = BaselineComparisonService(db=db)
+    comparisons = service.list_comparisons(project_id=project_id, baseline_id=baseline_id)
+    return [format_comparison_response(c) for c in comparisons]
+
+
 # Include sub-routers into main router
 router.include_router(project_router)
 router.include_router(api_router)
@@ -6059,3 +6574,6 @@ router.include_router(ai_router)
 router.include_router(investigation_router)
 router.include_router(test_suite_router)
 router.include_router(execution_plan_router)
+router.include_router(scan_profile_router)
+router.include_router(baseline_router)
+router.include_router(baseline_comparison_router)

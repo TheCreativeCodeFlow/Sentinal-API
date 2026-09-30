@@ -18,6 +18,9 @@ interface SecurityExecutionPlan {
   project_id: number;
   suite_id?: string | null;
   suite_name?: string | null;
+  profile_id?: string | null;
+  profile_name?: string | null;
+  source_type?: "PROFILE" | "SUITE" | "CUSTOM";
   name: string;
   status: "DRAFT" | "READY" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
   execution_mode: "SEQUENTIAL" | "FAIL_FAST" | "CONTINUE_ON_FAILURE";
@@ -350,7 +353,11 @@ export default function ExecutionPlansPage() {
                   <div className="flex items-start justify-between gap-2">
                     <div>
                       <h3 className="text-sm font-bold text-foreground line-clamp-1">{plan.name}</h3>
-                      {plan.suite_name ? (
+                      {plan.profile_name ? (
+                        <p className="text-[11px] text-muted-foreground mt-0.5">
+                          Profile: <span className="text-cyan-400 font-medium">{plan.profile_name}</span>
+                        </p>
+                      ) : plan.suite_name ? (
                         <p className="text-[11px] text-muted-foreground mt-0.5">
                           Suite: <span className="text-foreground">{plan.suite_name}</span>
                         </p>
@@ -422,6 +429,20 @@ export default function ExecutionPlansPage() {
                           className="h-7 text-xs bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border-rose-500/20"
                         >
                           Cancel
+                        </Button>
+                      )}
+                      {plan.status === "COMPLETED" && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            router.push("/baselines");
+                          }}
+                          className="h-7 text-xs bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border-emerald-500/20"
+                          title="Capture as Baseline"
+                        >
+                          Baseline
                         </Button>
                       )}
                       <Button

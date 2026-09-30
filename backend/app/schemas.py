@@ -1587,6 +1587,7 @@ class SecurityExecutionItemInDB(BaseModel):
 class SecurityExecutionPlanBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     suite_id: Optional[str] = None
+    profile_id: Optional[str] = None
     execution_mode: str = "SEQUENTIAL"
 
 
@@ -1607,6 +1608,9 @@ class SecurityExecutionPlanInDB(SecurityExecutionPlanBase):
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     suite_name: Optional[str] = None
+    profile_id: Optional[str] = None
+    profile_name: Optional[str] = None
+    source_type: Optional[str] = "CUSTOM"
     items: List[SecurityExecutionItemInDB] = []
 
     model_config = ConfigDict(from_attributes=True)
@@ -1631,3 +1635,198 @@ class SecurityExecutionProgressResponse(BaseModel):
     items: List[SecurityExecutionItemInDB] = []
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+
+
+# ==============================================================================
+# STAGE 10.2: Scan Profiles & Security Baselines Schemas
+# ==============================================================================
+
+class ProfileType(str, Enum):
+    QUICK = "QUICK"
+    STANDARD = "STANDARD"
+    DEEP = "DEEP"
+    CUSTOM = "CUSTOM"
+
+
+class ProfileStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    DISABLED = "DISABLED"
+
+
+class BaselineStatus(str, Enum):
+    DRAFT = "DRAFT"
+    ACTIVE = "ACTIVE"
+    ARCHIVED = "ARCHIVED"
+
+
+class ComparisonResult(str, Enum):
+    NEW_VIOLATION = "NEW_VIOLATION"
+    REGRESSION = "REGRESSION"
+    UNCHANGED = "UNCHANGED"
+    IMPROVED = "IMPROVED"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+
+
+# Scan Profiles
+class ScanProfileBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = None
+    profile_type: str = "STANDARD"
+    status: str = "ACTIVE"
+    configuration: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ScanProfileCreate(ScanProfileBase):
+    project_id: Optional[int] = None
+
+
+class ScanProfileUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[str] = None
+    profile_type: Optional[str] = None
+    status: Optional[str] = None
+    configuration: Optional[Dict[str, Any]] = None
+
+
+class ScanProfileInDB(ScanProfileBase):
+    id: str
+    project_id: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ScanProfileListResponse(BaseModel):
+    project_id: int
+    count: int
+    profiles: List[ScanProfileInDB] = []
+
+
+class TestSelectionReason(BaseModel):
+    security_test_id: str
+    test_type: str
+    endpoint: Optional[str] = None
+    priority: int
+    reason: str
+
+
+class ScanProfilePreviewResponse(BaseModel):
+    profile_id: str
+    profile_name: str
+    profile_type: str
+    selected_test_count: int
+    selected_tests: List[TestSelectionReason] = []
+
+
+class PlanFromProfileRequest(BaseModel):
+    name: Optional[str] = None
+    execution_mode: str = "SEQUENTIAL"
+
+
+# Security Baselines
+class SecurityBaselineControlBase(BaseModel):
+    control_type: str
+    target_type: str
+    target_id: Optional[str] = None
+    expected_behavior: str
+    severity: str = "MEDIUM"
+    enabled: bool = True
+    configuration: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SecurityBaselineControlInDB(SecurityBaselineControlBase):
+    id: str
+    baseline_id: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SecurityBaselineBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = None
+    status: str = "DRAFT"
+
+
+class SecurityBaselineCreate(SecurityBaselineBase):
+    project_id: Optional[int] = None
+    source_execution_plan_id: Optional[str] = None
+
+
+class SecurityBaselineUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[str] = None
+    status: Optional[str] = None
+
+
+class SecurityBaselineInDB(SecurityBaselineBase):
+    id: str
+    project_id: int
+    source_execution_plan_id: Optional[str] = None
+    version: int
+    control_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+    controls: List[SecurityBaselineControlInDB] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SecurityBaselineListResponse(BaseModel):
+    project_id: int
+    count: int
+    baselines: List[SecurityBaselineInDB] = []
+
+
+class BaselineFromPlanRequest(BaseModel):
+    execution_plan_id: str
+    name: Optional[str] = None
+    description: Optional[str] = None
+
+
+# Baseline Comparisons
+class SecurityBaselineComparisonItemInDB(BaseModel):
+    id: str
+    comparison_id: str
+    control_id: Optional[str] = None
+    security_test_id: Optional[str] = None
+    finding_id: Optional[str] = None
+    result: str
+    previous_behavior: Optional[str] = None
+    current_behavior: Optional[str] = None
+    explanation: Optional[str] = None
+    evidence_reference: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SecurityBaselineComparisonInDB(BaseModel):
+    id: str
+    baseline_id: str
+    execution_plan_id: str
+    status: str
+    summary: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    items: List[SecurityBaselineComparisonItemInDB] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SecurityBaselineComparisonDetailResponse(BaseModel):
+    comparison: SecurityBaselineComparisonInDB
+    baseline_name: str
+    baseline_version: int
+    plan_name: str
+    plan_status: str
+    regressions: List[SecurityBaselineComparisonItemInDB] = []
+    new_violations: List[SecurityBaselineComparisonItemInDB] = []
+    improvements: List[SecurityBaselineComparisonItemInDB] = []
+    unchanged: List[SecurityBaselineComparisonItemInDB] = []
+    not_applicable: List[SecurityBaselineComparisonItemInDB] = []
+
+
+class ComparePlanWithBaselineRequest(BaseModel):
+    baseline_id: str
+    execution_plan_id: str

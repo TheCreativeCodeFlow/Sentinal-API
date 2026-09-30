@@ -31,6 +31,21 @@ from app.services.security_engine.orchestrator import (
     EntityNotFoundError,
     InvalidSuiteStateError,
 )
+from app.services.security_engine.scan_profile_service import (
+    ScanProfileService,
+    ScanProfileError,
+    ProfileNotFoundError,
+    DuplicateProfileError,
+    DisabledProfileError,
+)
+from app.services.security_engine.baseline_service import (
+    SecurityBaselineService,
+    BaselineComparisonService,
+    BaselineError,
+    BaselineNotFoundError,
+    ComparisonNotFoundError,
+    InvalidBaselinePlanError,
+)
 
 __all__ = [
     "AsyncSecurityHttpClient",
@@ -56,6 +71,17 @@ __all__ = [
     "AuthorizationError",
     "EntityNotFoundError",
     "InvalidSuiteStateError",
+    "ScanProfileService",
+    "ScanProfileError",
+    "ProfileNotFoundError",
+    "DuplicateProfileError",
+    "DisabledProfileError",
+    "SecurityBaselineService",
+    "BaselineComparisonService",
+    "BaselineError",
+    "BaselineNotFoundError",
+    "ComparisonNotFoundError",
+    "InvalidBaselinePlanError",
     "redact_headers",
     "redact_text",
 ]
