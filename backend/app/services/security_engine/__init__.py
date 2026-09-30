@@ -57,6 +57,14 @@ from app.services.security_engine.security_gate_service import (
     InvalidEvaluationStateError,
     get_gate_exit_code,
 )
+from app.services.security_engine.report_service import (
+    SecurityReportService,
+    SecurityReportError,
+    ReportNotFoundError,
+    DuplicateReportError,
+    InvalidReportSourceError,
+    ArchivedReportError,
+)
 
 __all__ = [
     "AsyncSecurityHttpClient",
@@ -101,6 +109,12 @@ __all__ = [
     "InvalidGateRuleError",
     "InvalidEvaluationStateError",
     "get_gate_exit_code",
+    "SecurityReportService",
+    "SecurityReportError",
+    "ReportNotFoundError",
+    "DuplicateReportError",
+    "InvalidReportSourceError",
+    "ArchivedReportError",
     "redact_headers",
     "redact_text",
 ]

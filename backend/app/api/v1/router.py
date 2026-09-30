@@ -54,6 +54,8 @@ from app.models import (
     SecurityGate,
     SecurityGateEvaluation,
     SecurityGateEvaluationItem,
+    SecurityReport,
+    SecurityReportSnapshot,
 )
 from app.schemas import (
     ProjectCreate,
@@ -243,6 +245,13 @@ from app.schemas import (
     SecurityGateEvaluationInDB,
     SecurityGateEvaluationListResponse,
     SecurityGateCIResult,
+    SecurityReportCreate,
+    SecurityReportUpdate,
+    SecurityReportInDB,
+    SecurityReportListResponse,
+    SecurityReportSnapshotInDB,
+    SecurityReportManifest,
+    SecurityReportDetailResponse,
 )
 from app.services.security_engine.redactor import SENSITIVE_HEADER_NAMES
 from app.services.security_engine.correlation_engine import CorrelationEngine
@@ -286,6 +295,14 @@ from app.services.security_engine.security_gate_service import (
     InvalidGateRuleError,
     InvalidEvaluationStateError,
     get_gate_exit_code,
+)
+from app.services.security_engine.report_service import (
+    SecurityReportService,
+    SecurityReportError,
+    ReportNotFoundError,
+    DuplicateReportError,
+    InvalidReportSourceError,
+    ArchivedReportError,
 )
 from app.services.ai import (
     AISecurityService,
@@ -6860,6 +6877,272 @@ def list_project_security_gate_evaluations(
     )
 
 
+# --- Security Report Endpoints ---
+
+security_report_router = APIRouter(tags=["Security Reports"])
+
+
+def format_report_response(report: SecurityReport) -> SecurityReportInDB:
+    latest_snapshot = report.snapshots[0] if report.snapshots else None
+    return SecurityReportInDB(
+        id=report.id,
+        project_id=report.project_id,
+        name=report.name,
+        description=report.description,
+        status=report.status,
+        report_type=report.report_type,
+        source_execution_plan_id=report.source_execution_plan_id,
+        source_gate_evaluation_id=report.source_gate_evaluation_id,
+        source_investigation_id=report.source_investigation_id,
+        version=report.version,
+        created_at=report.created_at,
+        updated_at=report.updated_at,
+        generated_at=report.generated_at,
+        latest_snapshot_checksum=latest_snapshot.checksum if latest_snapshot else None,
+        execution_plan_name=report.execution_plan.name if report.execution_plan else None,
+        gate_name=report.gate_evaluation.gate.name if report.gate_evaluation and report.gate_evaluation.gate else None,
+        investigation_title=report.investigation.title if report.investigation else None,
+    )
+
+
+def format_snapshot_response(snapshot: SecurityReportSnapshot) -> SecurityReportSnapshotInDB:
+    return SecurityReportSnapshotInDB(
+        id=snapshot.id,
+        report_id=snapshot.report_id,
+        version=snapshot.version,
+        generated_at=snapshot.generated_at,
+        checksum=snapshot.checksum,
+        schema_version=snapshot.schema_version,
+        report_json=snapshot.report_json,
+    )
+
+
+@security_report_router.post(
+    "/projects/{project_id}/security-reports",
+    response_model=SecurityReportInDB,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_security_report(
+    project_id: int,
+    report_in: SecurityReportCreate,
+    db: Session = Depends(get_db),
+):
+    get_project_or_404(project_id, db)
+    service = SecurityReportService(db=db)
+    try:
+        report = service.create_report(
+            project_id=project_id,
+            name=report_in.name,
+            description=report_in.description,
+            report_type=report_in.report_type,
+            source_execution_plan_id=report_in.source_execution_plan_id,
+            source_gate_evaluation_id=report_in.source_gate_evaluation_id,
+            source_investigation_id=report_in.source_investigation_id,
+        )
+    except DuplicateReportError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except (InvalidReportSourceError, CrossProjectViolationError, SecurityReportError) as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except ReportNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return format_report_response(report)
+
+
+@security_report_router.get(
+    "/projects/{project_id}/security-reports",
+    response_model=SecurityReportListResponse,
+)
+def list_security_reports(
+    project_id: int,
+    status: Optional[str] = None,
+    report_type: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    get_project_or_404(project_id, db)
+    service = SecurityReportService(db=db)
+    reports = service.list_reports(project_id=project_id, status=status, report_type=report_type)
+    return SecurityReportListResponse(
+        project_id=project_id,
+        count=len(reports),
+        reports=[format_report_response(r) for r in reports],
+    )
+
+
+@security_report_router.get(
+    "/security-reports/{report_id}",
+    response_model=SecurityReportDetailResponse,
+)
+def get_security_report(
+    report_id: str,
+    db: Session = Depends(get_db),
+):
+    service = SecurityReportService(db=db)
+    report = service.get_report(report_id)
+    if not report:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Security report '{report_id}' not found.",
+        )
+
+    latest_snapshot = None
+    manifest = None
+    if report.snapshots:
+        latest_snapshot = format_snapshot_response(report.snapshots[0])
+        try:
+            manifest_dict = service.get_manifest(report_id)
+            manifest = SecurityReportManifest(**manifest_dict)
+        except Exception:
+            pass
+
+    return SecurityReportDetailResponse(
+        report=format_report_response(report),
+        latest_snapshot=latest_snapshot,
+        manifest=manifest,
+    )
+
+
+@security_report_router.patch(
+    "/security-reports/{report_id}",
+    response_model=SecurityReportInDB,
+)
+def patch_security_report(
+    report_id: str,
+    report_in: SecurityReportUpdate,
+    db: Session = Depends(get_db),
+):
+    service = SecurityReportService(db=db)
+    try:
+        report = service.update_report(
+            report_id=report_id,
+            name=report_in.name,
+            description=report_in.description,
+            report_type=report_in.report_type,
+            source_execution_plan_id=report_in.source_execution_plan_id,
+            source_gate_evaluation_id=report_in.source_gate_evaluation_id,
+            source_investigation_id=report_in.source_investigation_id,
+        )
+    except ReportNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except DuplicateReportError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except (ArchivedReportError, InvalidReportSourceError, CrossProjectViolationError, SecurityReportError) as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return format_report_response(report)
+
+
+@security_report_router.put(
+    "/security-reports/{report_id}",
+    response_model=SecurityReportInDB,
+)
+def put_security_report(
+    report_id: str,
+    report_in: SecurityReportUpdate,
+    db: Session = Depends(get_db),
+):
+    return patch_security_report(report_id=report_id, report_in=report_in, db=db)
+
+
+@security_report_router.delete(
+    "/security-reports/{report_id}",
+    status_code=status.HTTP_200_OK,
+)
+def delete_security_report(
+    report_id: str,
+    db: Session = Depends(get_db),
+):
+    service = SecurityReportService(db=db)
+    try:
+        service.delete_report(report_id)
+    except ReportNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return {"message": "Security report deleted successfully"}
+
+
+@security_report_router.post(
+    "/security-reports/{report_id}/generate",
+    response_model=SecurityReportSnapshotInDB,
+    status_code=status.HTTP_200_OK,
+)
+def generate_security_report(
+    report_id: str,
+    db: Session = Depends(get_db),
+):
+    service = SecurityReportService(db=db)
+    try:
+        snapshot = service.generate_report(report_id)
+    except ReportNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except (ArchivedReportError, SecurityReportError) as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return format_snapshot_response(snapshot)
+
+
+@security_report_router.post(
+    "/security-reports/{report_id}/archive",
+    response_model=SecurityReportInDB,
+    status_code=status.HTTP_200_OK,
+)
+def archive_security_report(
+    report_id: str,
+    db: Session = Depends(get_db),
+):
+    service = SecurityReportService(db=db)
+    try:
+        report = service.archive_report(report_id)
+    except ReportNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return format_report_response(report)
+
+
+@security_report_router.get(
+    "/security-reports/{report_id}/json",
+)
+def get_security_report_json(
+    report_id: str,
+    version: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    service = SecurityReportService(db=db)
+    try:
+        snapshot = service.get_snapshot(report_id, version=version)
+    except ReportNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return snapshot.report_json
+
+
+@security_report_router.get(
+    "/security-reports/{report_id}/manifest",
+    response_model=SecurityReportManifest,
+)
+def get_security_report_manifest(
+    report_id: str,
+    version: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    service = SecurityReportService(db=db)
+    try:
+        manifest = service.get_manifest(report_id, version=version)
+    except ReportNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return manifest
+
+
+@security_report_router.get(
+    "/security-reports/{report_id}/package",
+)
+def get_security_report_evidence_package(
+    report_id: str,
+    version: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    service = SecurityReportService(db=db)
+    try:
+        package = service.get_evidence_package(report_id, version=version)
+    except ReportNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return package
+
+
 # Include sub-routers into main router
 router.include_router(project_router)
 router.include_router(api_router)
@@ -6888,3 +7171,4 @@ router.include_router(scan_profile_router)
 router.include_router(baseline_router)
 router.include_router(baseline_comparison_router)
 router.include_router(security_gate_router)
+router.include_router(security_report_router)

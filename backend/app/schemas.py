@@ -1989,3 +1989,105 @@ class SecurityGateCIResult(BaseModel):
     metrics: SecurityGateMetrics
     triggered_rules: List[TriggeredRuleInfo] = []
     evaluated_at: datetime
+
+
+# ==============================================================================
+# STAGE 10.4: Security Reporting & Evidence Packages Schemas
+# ==============================================================================
+
+class ReportStatus(str, Enum):
+    DRAFT = "DRAFT"
+    GENERATED = "GENERATED"
+    ARCHIVED = "ARCHIVED"
+
+
+class ReportType(str, Enum):
+    EXECUTION = "EXECUTION"
+    BASELINE_REGRESSION = "BASELINE_REGRESSION"
+    SECURITY_ASSESSMENT = "SECURITY_ASSESSMENT"
+    INVESTIGATION = "INVESTIGATION"
+
+
+class ProvenanceCategory(str, Enum):
+    VERIFIED = "VERIFIED"
+    DETERMINISTIC = "DETERMINISTIC"
+    AI = "AI"
+    HUMAN = "HUMAN"
+    ENGINE = "ENGINE"
+
+
+class SecurityReportBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = None
+    report_type: str = "SECURITY_ASSESSMENT"
+    source_execution_plan_id: Optional[str] = None
+    source_gate_evaluation_id: Optional[str] = None
+    source_investigation_id: Optional[str] = None
+
+
+class SecurityReportCreate(SecurityReportBase):
+    project_id: Optional[int] = None
+
+
+class SecurityReportUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[str] = None
+    report_type: Optional[str] = None
+    source_execution_plan_id: Optional[str] = None
+    source_gate_evaluation_id: Optional[str] = None
+    source_investigation_id: Optional[str] = None
+
+
+class SecurityReportInDB(SecurityReportBase):
+    id: str
+    project_id: int
+    status: str
+    version: int
+    created_at: datetime
+    updated_at: datetime
+    generated_at: Optional[datetime] = None
+    latest_snapshot_checksum: Optional[str] = None
+    execution_plan_name: Optional[str] = None
+    gate_name: Optional[str] = None
+    investigation_title: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SecurityReportListResponse(BaseModel):
+    project_id: int
+    count: int
+    reports: List[SecurityReportInDB] = []
+
+
+class SecurityReportSnapshotInDB(BaseModel):
+    id: str
+    report_id: str
+    version: int
+    generated_at: datetime
+    checksum: str
+    schema_version: str
+    report_json: Dict[str, Any]
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SecurityReportManifest(BaseModel):
+    package_version: str = "1.0"
+    schema_version: str = "1.0"
+    report_id: str
+    report_version: int
+    project_id: int
+    generated_at: datetime
+    object_counts: Dict[str, int]
+    checksums: Dict[str, str]
+    source_execution_plan_id: Optional[str] = None
+    source_gate_evaluation_id: Optional[str] = None
+    source_investigation_id: Optional[str] = None
+    integrity_status: str = "VERIFIED"
+
+
+class SecurityReportDetailResponse(BaseModel):
+    report: SecurityReportInDB
+    latest_snapshot: Optional[SecurityReportSnapshotInDB] = None
+    manifest: Optional[SecurityReportManifest] = None

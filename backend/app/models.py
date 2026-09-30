@@ -59,6 +59,7 @@ class Project(Base):
     scan_profiles = relationship("ScanProfile", back_populates="project", cascade="all, delete-orphan")
     baselines = relationship("SecurityBaseline", back_populates="project", cascade="all, delete-orphan")
     security_gates = relationship("SecurityGate", back_populates="project", cascade="all, delete-orphan")
+    security_reports = relationship("SecurityReport", back_populates="project", cascade="all, delete-orphan")
 
 
 class API(Base):
@@ -1531,6 +1532,65 @@ class SecurityGateEvaluationItem(Base):
     )
 
 
+# ==============================================================================
+# STAGE 10.4: Security Reporting & Evidence Packages Models
+# ==============================================================================
+
+class SecurityReport(Base):
+    __tablename__ = "security_reports"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    description = Column(Text, nullable=True)
+    status = Column(String(50), nullable=False, default="DRAFT", index=True)  # DRAFT, GENERATED, ARCHIVED
+    report_type = Column(String(50), nullable=False, default="SECURITY_ASSESSMENT", index=True)  # EXECUTION, BASELINE_REGRESSION, SECURITY_ASSESSMENT, INVESTIGATION
+    source_execution_plan_id = Column(String(36), ForeignKey("security_execution_plans.id", ondelete="SET NULL"), nullable=True, index=True)
+    source_gate_evaluation_id = Column(String(36), ForeignKey("security_gate_evaluations.id", ondelete="SET NULL"), nullable=True, index=True)
+    source_investigation_id = Column(String(36), ForeignKey("security_investigations.id", ondelete="SET NULL"), nullable=True, index=True)
+    version = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+    generated_at = Column(DateTime(timezone=True), nullable=True)
+
+    project = relationship("Project", back_populates="security_reports")
+    execution_plan = relationship("SecurityExecutionPlan")
+    gate_evaluation = relationship("SecurityGateEvaluation")
+    investigation = relationship("SecurityInvestigation")
+    snapshots = relationship(
+        "SecurityReportSnapshot",
+        back_populates="report",
+        cascade="all, delete-orphan",
+        order_by="SecurityReportSnapshot.version.desc()",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_security_report_project_name"),
+        Index("ix_security_reports_proj_status", "project_id", "status"),
+    )
+
+
+class SecurityReportSnapshot(Base):
+    __tablename__ = "security_report_snapshots"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    report_id = Column(String(36), ForeignKey("security_reports.id", ondelete="CASCADE"), nullable=False, index=True)
+    version = Column(Integer, nullable=False, default=1)
+    generated_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    report_json = Column(JSON, nullable=False)
+    checksum = Column(String(64), nullable=False)  # SHA-256
+    schema_version = Column(String(20), nullable=False, default="1.0")
+
+    report = relationship("SecurityReport", back_populates="snapshots")
+
+    __table_args__ = (
+        UniqueConstraint("report_id", "version", name="uq_report_snapshot_version"),
+        Index("ix_report_snapshots_report_ver", "report_id", "version"),
+    )
+
+
 # Prevent pytest from treating model classes as test case classes
 AttackGraph.__test__ = False
 AttackGraphNode.__test__ = False
@@ -1558,3 +1618,5 @@ SecurityBaselineComparisonItem.__test__ = False
 SecurityGate.__test__ = False
 SecurityGateEvaluation.__test__ = False
 SecurityGateEvaluationItem.__test__ = False
+SecurityReport.__test__ = False
+SecurityReportSnapshot.__test__ = False
