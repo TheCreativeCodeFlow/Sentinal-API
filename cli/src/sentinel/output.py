@@ -16,7 +16,11 @@ def mask_sensitive(data: Any) -> Any:
         masked = {}
         for k, v in data.items():
             lower_k = str(k).lower()
-            if any(sec in lower_k for sec in ("token", "secret", "password", "apikey", "api_key", "cookie", "auth")):
+            if lower_k in ("authenticated", "authorization_status"):
+                masked[k] = mask_sensitive(v)
+            elif any(sec in lower_k for sec in ("token", "secret", "password", "apikey", "api_key", "cookie", "authorization")):
+                masked[k] = "[REDACTED]"
+            elif lower_k in ("auth", "auth_token", "auth_header"):
                 masked[k] = "[REDACTED]"
             else:
                 masked[k] = mask_sensitive(v)

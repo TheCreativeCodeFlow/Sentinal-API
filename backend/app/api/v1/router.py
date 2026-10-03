@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Request, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
@@ -1074,15 +1074,6 @@ def format_workflow_attack_scenario_detail(scenario: WorkflowAttackScenario, db:
 router = APIRouter(tags=["api"])
 
 
-@router.get("/auth/verify")
-def verify_api_authentication():
-    """Verify that connection to SentinelAPI is functional and API token is valid."""
-    return {
-        "status": "authenticated",
-        "message": "SentinelAPI connection and credentials valid.",
-    }
-
-
 # Project endpoints
 project_router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -1090,11 +1081,18 @@ project_router = APIRouter(prefix="/projects", tags=["projects"])
 @project_router.post("/", response_model=ProjectInDB, status_code=status.HTTP_201_CREATED)
 def create_project(
     project_in: ProjectCreate,
+    request: Request,
     db: Session = Depends(get_db),
 ):
     """Create a new project."""
     import json as _json
-    
+    import uuid as _uuid
+    from app.services.auth.permission_service import seed_project_roles, get_current_actor
+    from app.services.auth.audit_service import audit_service
+    from app.models import ProjectMembership, Role
+
+    actor = get_current_actor(request, db)
+
     project = Project(
         name=project_in.name,
         description=project_in.description,
@@ -1105,6 +1103,21 @@ def create_project(
     db.add(project)
     db.commit()
     db.refresh(project)
+
+    audit_service.record(
+        db=db,
+        event_type="PROJECT",
+        action="CREATE",
+        resource_type="PROJECT",
+        resource_id=str(project.id),
+        project_id=project.id,
+        actor_user_id=actor.user_id,
+        request_id=getattr(request.state, "request_id", None),
+        ip_address=request.client.host if request.client else None,
+        outcome="SUCCESS",
+        metadata={"name": project.name, "environment": project.environment},
+    )
+
     return project
 
 
@@ -7577,3 +7590,18 @@ router.include_router(baseline_comparison_router)
 router.include_router(security_gate_router)
 router.include_router(security_report_router)
 router.include_router(scan_schedule_router)
+
+from app.api.v1.auth_rbac_router import (
+    auth_router,
+    user_router,
+    token_router,
+    membership_router,
+    permissions_and_roles_router,
+    audit_router,
+)
+router.include_router(auth_router)
+router.include_router(user_router)
+router.include_router(token_router)
+router.include_router(membership_router)
+router.include_router(permissions_and_roles_router)
+router.include_router(audit_router)

@@ -62,6 +62,9 @@ class Project(Base):
     security_reports = relationship("SecurityReport", back_populates="project", cascade="all, delete-orphan")
     security_scan_schedules = relationship("SecurityScanSchedule", back_populates="project", cascade="all, delete-orphan")
     scheduled_executions = relationship("SecurityScheduledExecution", back_populates="project", cascade="all, delete-orphan")
+    memberships = relationship("ProjectMembership", back_populates="project", cascade="all, delete-orphan")
+    audit_events = relationship("AuditEvent", back_populates="project")
+
 
 
 class API(Base):
@@ -125,6 +128,8 @@ class Role(Base):
 
     project = relationship("Project", back_populates="roles")
     identities = relationship("Identity", back_populates="role")
+    permissions = relationship("Permission", secondary="role_permissions", back_populates="roles")
+
 
     __table_args__ = (
         Index("ix_roles_project_name", "project_id", "name", unique=True),
@@ -1669,6 +1674,118 @@ class SecurityScheduledExecution(Base):
     )
 
 
+# ==============================================================================
+# STAGE 10.7: Production Hardening, RBAC & Audit Models
+# ==============================================================================
+
+role_permissions = Table(
+    "role_permissions",
+    Base.metadata,
+    Column("role_id", String(36), ForeignKey("roles.id", ondelete="CASCADE"), primary_key=True),
+    Column("permission_id", String(36), ForeignKey("permissions.id", ondelete="CASCADE"), primary_key=True),
+)
+
+
+class Permission(Base):
+    __tablename__ = "permissions"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    key = Column(String(100), unique=True, nullable=False, index=True)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    roles = relationship("Role", secondary=role_permissions, back_populates="permissions")
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    display_name = Column(String(200), nullable=False)
+    status = Column(String(50), nullable=False, default="ACTIVE", index=True)  # ACTIVE, DISABLED
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+    last_authenticated_at = Column(DateTime(timezone=True), nullable=True)
+
+    api_tokens = relationship("ApiToken", back_populates="user", cascade="all, delete-orphan")
+    memberships = relationship("ProjectMembership", back_populates="user", cascade="all, delete-orphan")
+    audit_events = relationship("AuditEvent", back_populates="actor_user")
+
+
+class ApiToken(Base):
+    __tablename__ = "api_tokens"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    token_hash = Column(String(128), nullable=False, index=True)
+    token_prefix = Column(String(20), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    status = Column(String(50), nullable=False, default="ACTIVE", index=True)  # ACTIVE, REVOKED, EXPIRED
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+    user = relationship("User", back_populates="api_tokens")
+
+    __table_args__ = (
+        Index("ix_api_tokens_user_status", "user_id", "status"),
+        Index("ix_api_tokens_hash", "token_hash"),
+    )
+
+
+class ProjectMembership(Base):
+    __tablename__ = "project_memberships"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    role_id = Column(String(36), ForeignKey("roles.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String(50), nullable=False, default="ACTIVE", index=True)  # ACTIVE, DISABLED
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    project = relationship("Project", back_populates="memberships")
+    user = relationship("User", back_populates="memberships")
+    role = relationship("Role")
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "user_id", name="uq_project_membership_user"),
+        Index("ix_membership_proj_user", "project_id", "user_id"),
+    )
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True)
+    actor_user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    event_type = Column(String(100), nullable=False, index=True)
+    action = Column(String(50), nullable=False)
+    resource_type = Column(String(100), nullable=False, index=True)
+    resource_id = Column(String(100), nullable=True, index=True)
+    outcome = Column(String(50), nullable=False, index=True)  # SUCCESS, DENIED, FAILURE
+    request_id = Column(String(100), nullable=False, index=True)
+    ip_address = Column(String(100), nullable=True)
+    user_agent = Column(Text, nullable=True)
+    metadata_json = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+
+    project = relationship("Project", back_populates="audit_events")
+    actor_user = relationship("User", back_populates="audit_events")
+
+    __table_args__ = (
+        Index("ix_audit_events_proj_created", "project_id", "created_at"),
+        Index("ix_audit_events_type_outcome", "event_type", "outcome"),
+    )
+
+
 # Prevent pytest from treating model classes as test case classes
 AttackGraph.__test__ = False
 AttackGraphNode.__test__ = False
@@ -1700,3 +1817,8 @@ SecurityReport.__test__ = False
 SecurityReportSnapshot.__test__ = False
 SecurityScanSchedule.__test__ = False
 SecurityScheduledExecution.__test__ = False
+User.__test__ = False
+ApiToken.__test__ = False
+Permission.__test__ = False
+ProjectMembership.__test__ = False
+AuditEvent.__test__ = False

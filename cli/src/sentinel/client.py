@@ -361,3 +361,42 @@ class SentinelClient:
         """Retrieve details of a scheduled execution."""
         return self._request("GET", f"/api/v1/security-scheduled-executions/{execution_id}")
 
+    def verify_auth(self) -> Dict[str, Any]:
+        """Verify current authentication token with backend."""
+        return self._request("GET", "/api/v1/auth/verify")
+
+    def get_token_status(self) -> Dict[str, Any]:
+        """Check status, expiration, and validity of active token."""
+        return self._request("GET", "/api/v1/auth/token-status")
+
+    def list_audit_events(
+        self,
+        project_id: Optional[int] = None,
+        event_type: Optional[str] = None,
+        action: Optional[str] = None,
+        outcome: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """List audit events."""
+        params: Dict[str, Any] = {"limit": limit}
+        if event_type:
+            params["event_type"] = event_type
+        if action:
+            params["action"] = action
+        if outcome:
+            params["outcome"] = outcome
+
+        if project_id:
+            data = self._request("GET", f"/api/v1/projects/{project_id}/audit-events", params=params)
+        else:
+            data = self._request("GET", "/api/v1/audit-events", params=params)
+
+        if isinstance(data, dict) and "events" in data:
+            return data["events"]
+        return data or []
+
+    def get_audit_event(self, event_id: str) -> Dict[str, Any]:
+        """Retrieve details of a single immutable audit event."""
+        return self._request("GET", f"/api/v1/audit-events/{event_id}")
+
+

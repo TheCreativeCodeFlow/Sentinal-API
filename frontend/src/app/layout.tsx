@@ -26,6 +26,7 @@ const menuItems = [
   { href: "/security-gates", label: "Security Gates", key: "7n" },
   { href: "/security-reports", label: "Security Reports", key: "7o" },
   { href: "/security-schedules", label: "Scan Schedules", key: "7p" },
+  { href: "/security-audit", label: "Security Audit", key: "7q" },
   { href: "/security-tests", label: "Security Tests", key: "8" },
   { href: "/findings", label: "Findings", key: "9" },
   { href: "/attack-surface", label: "Attack Surface", key: "10" },

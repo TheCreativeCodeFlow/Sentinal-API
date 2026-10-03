@@ -2222,3 +2222,177 @@ class SecurityScheduledExecutionListResponse(BaseModel):
     project_id: int
     count: int
     executions: List[SecurityScheduledExecutionInDB] = []
+
+
+# ==============================================================================
+# STAGE 10.7: Production Hardening, RBAC & Audit Schemas
+# ==============================================================================
+
+class PermissionInDB(BaseModel):
+    id: str
+    key: str
+    description: Optional[str] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PermissionListResponse(BaseModel):
+    count: int
+    permissions: List[PermissionInDB] = []
+
+
+class RoleWithPermissionsInDB(RoleInDB):
+    permissions: List[PermissionInDB] = []
+
+
+class RoleAssignPermissions(BaseModel):
+    permission_keys: List[str]
+
+
+class UserBase(BaseModel):
+    email: str = Field(..., min_length=3, max_length=255)
+    display_name: str = Field(..., min_length=1, max_length=255)
+
+
+class UserCreate(UserBase):
+    pass
+
+
+class UserUpdate(BaseModel):
+    display_name: Optional[str] = Field(None, min_length=1, max_length=255)
+    status: Optional[str] = None
+
+
+class UserInDB(UserBase):
+    id: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    last_authenticated_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class UserListResponse(BaseModel):
+    count: int
+    users: List[UserInDB] = []
+
+
+class ApiTokenCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    expires_in_days: Optional[int] = Field(None, ge=1, le=365)
+
+
+class ApiTokenInDB(BaseModel):
+    id: str
+    user_id: str
+    name: str
+    token_prefix: str
+    status: str
+    expires_at: Optional[datetime] = None
+    last_used_at: Optional[datetime] = None
+    created_at: datetime
+    revoked_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ApiTokenCreatedResponse(ApiTokenInDB):
+    raw_token: str
+
+
+class ApiTokenListResponse(BaseModel):
+    user_id: str
+    count: int
+    tokens: List[ApiTokenInDB] = []
+
+
+class TokenVerifyResponse(BaseModel):
+    authenticated: bool = True
+    status: str = "authenticated"
+    message: str = "SentinelAPI connection and credentials valid."
+    user: Optional[UserInDB] = None
+    token_id: Optional[str] = None
+    token_name: Optional[str] = None
+    expires_at: Optional[datetime] = None
+    is_development_bypass: bool = False
+
+
+class TokenStatusResponse(BaseModel):
+    valid: bool
+    status: str
+    user_id: Optional[str] = None
+    token_name: Optional[str] = None
+    expires_at: Optional[datetime] = None
+    last_used_at: Optional[datetime] = None
+    days_until_expiration: Optional[int] = None
+
+
+class ProjectMembershipCreate(BaseModel):
+    user_id: str
+    role_id: str
+
+
+class ProjectMembershipUpdate(BaseModel):
+    role_id: Optional[str] = None
+    status: Optional[str] = None
+
+
+class ProjectMembershipInDB(BaseModel):
+    id: str
+    project_id: int
+    user_id: str
+    role_id: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    user_email: Optional[str] = None
+    user_display_name: Optional[str] = None
+    role_name: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProjectMembershipListResponse(BaseModel):
+    project_id: int
+    count: int
+    memberships: List[ProjectMembershipInDB] = []
+
+
+class AuditEventInDB(BaseModel):
+    id: str
+    project_id: Optional[int] = None
+    actor_user_id: Optional[str] = None
+    actor_email: Optional[str] = None
+    event_type: str
+    action: str
+    resource_type: str
+    resource_id: Optional[str] = None
+    outcome: str
+    request_id: Optional[str] = None
+    ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
+    metadata_json: Optional[Dict[str, Any]] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AuditEventListResponse(BaseModel):
+    project_id: Optional[int] = None
+    count: int
+    events: List[AuditEventInDB] = []
+
+
+class AuditEventFilter(BaseModel):
+    event_type: Optional[str] = None
+    action: Optional[str] = None
+    resource_type: Optional[str] = None
+    resource_id: Optional[str] = None
+    actor_user_id: Optional[str] = None
+    outcome: Optional[str] = None
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    limit: int = 100
+    offset: int = 0
